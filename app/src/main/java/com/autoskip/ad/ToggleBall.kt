@@ -8,9 +8,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -43,6 +45,7 @@ object ToggleBall {
     private var initialRawY = 0f
     private var dragThreshold = 0f
     private var isDragging = false
+    private var touchDownAt = 0L
 
     val isShowing: Boolean get() = ballView != null
     private val isPanelShowing: Boolean get() = panelView != null
@@ -67,8 +70,11 @@ object ToggleBall {
 
         val prefs = ctx.getSharedPreferences(PREF_POS, Context.MODE_PRIVATE)
         val bounds = screenBounds(ctx)
-        var x = prefs.getInt("x", bounds.width() - size * 2)
-        var y = prefs.getInt("y", bounds.height() / 2)
+        // 位置可能来自旧分辨率/旧版本,夹回屏内,避免球挂在看不见的地方
+        val maxX = (bounds.width() - size).coerceAtLeast(0)
+        val maxY = (bounds.height() - size).coerceAtLeast(0)
+        val x = prefs.getInt("x", bounds.width() - size * 2).coerceIn(0, maxX)
+        val y = prefs.getInt("y", bounds.height() / 2).coerceIn(0, maxY)
 
         val params = WindowManager.LayoutParams(
             size, size,
@@ -90,6 +96,7 @@ object ToggleBall {
                     initialTouchY = event.rawY
                     initialRawX = params.x.toFloat()
                     initialRawY = params.y.toFloat()
+                    touchDownAt = android.os.SystemClock.uptimeMillis()
                     isDragging = false
                     true
                 }
@@ -101,16 +108,28 @@ object ToggleBall {
                         isDragging = true
                     }
                     if (isDragging) {
-                        params.x = (initialRawX + dx).toInt()
-                        params.y = (initialRawY + dy).toInt()
+                        // 拖动过程中就夹在屏内,避免存下屏幕外坐标
+                        params.x = (initialRawX + dx).toInt().coerceIn(0, maxX)
+                        params.y = (initialRawY + dy).toInt().coerceIn(0, maxY)
                         runCatching { wm.updateViewLayout(v, params) }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     if (!isDragging) {
-                        togglePanel(ctx)
+                        // 短按 = 打开面板;长按 = 快速切换总开关
+                        val longPress = android.os.SystemClock.uptimeMillis() - touchDownAt >=
+                                ViewConfiguration.getLongPressTimeout()
+                        if (longPress) {
+                            v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                            toggleMaster(ctx)
+                        } else {
+                            togglePanel(ctx)
+                        }
                     } else {
+                        params.x = params.x.coerceIn(0, maxX)
+                        params.y = params.y.coerceIn(0, maxY)
+                        runCatching { wm.updateViewLayout(v, params) }
                         ctx.getSharedPreferences(PREF_POS, Context.MODE_PRIVATE).edit()
                             .putInt("x", params.x).putInt("y", params.y).apply()
                     }
@@ -149,6 +168,26 @@ object ToggleBall {
         runCatching { wm.removeView(v) }
     }
 
+    /** 外部(通知栏按钮/主界面)改了总开关后,同步球上的「开/关」指示。 */
+    fun refresh(ctx: Context) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post { updateState(ctx) }
+            return
+        }
+        updateState(ctx)
+    }
+
+    /** 长按悬浮球:快速切换总开关。 */
+    private fun toggleMaster(ctx: Context) {
+        val on = !AppSettings.masterEnabled(ctx)
+        AppSettings.setMasterEnabled(ctx, on)
+        updateState(ctx)
+        if (!on) AdHintOverlay.hide(ctx)
+        LogBuf.add("悬浮球长按:自动跳过已${if (on) "开启" else "关闭"}")
+        AdHintOverlay.show(ctx, if (on) "自动跳过已开启" else "自动跳过已关闭")
+        GuardService.updateNotification(ctx)
+    }
+
     // ---------- 管理面板 ----------
 
     /** 单击悬浮球:面板开着就收掉,没开就弹出。 */
@@ -176,6 +215,7 @@ object ToggleBall {
                 AppSettings.setMasterEnabled(ctx, checked)
                 updateState(ctx) // 球体同步显示当前状态
                 if (!checked) AdHintOverlay.hide(ctx) // 关掉时清掉残留提示
+                GuardService.updateNotification(ctx)
                 LogBuf.add("面板:自动跳过已${if (checked) "开启" else "关闭"}")
             }
         }

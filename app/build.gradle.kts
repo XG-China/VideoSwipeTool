@@ -19,14 +19,14 @@ val keystoreProperties = Properties().apply {
 
 android {
     namespace = "com.autoskip.ad"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.autoskip.ad"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 142
-        versionName = "1.0.42"
+        targetSdk = 36
+        versionCode = 143
+        versionName = "1.1.0"
     }
 
     signingConfigs {
@@ -79,4 +79,5 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.ui.tooling.preview)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 }
