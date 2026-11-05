@@ -75,6 +75,9 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var lastCountdownValue: Int? = null   // 上一次看到的倒计时秒数
     private var countdownValueAt = 0L
     private var episodeReadRetries = 0            // 换页动画期间读不到集数时重试次数
+    private var resultRetries = 0                 // 拿不到窗口时的重试次数
+    private var destroyed = false
+    private var receiverRegistered = false
 
     // 定时主动扫描:红果广告可能是静态 SurfaceView(不产生无障碍事件),
     // 只靠事件驱动会漏扫 → 必须定时轮询。间隔由设置决定(默认 1 秒)。
@@ -92,16 +95,22 @@ class AdSkipAccessibilityService : AccessibilityService() {
         // 启动保活前台服务,防止 MIUI 冻结进程导致断连
         GuardService.start(this)
         // 注册手动上滑指令(验证手势链路 + 通知栏按钮用)
-        runCatching {
-            val f = android.content.IntentFilter(ACTION_SWIPE_NOW)
-            androidx.core.content.ContextCompat.registerReceiver(
-                this,
-                手动上滑,
-                f,
-                // 保持 EXPORTED:README 里的 adb 调试指令来自 shell(不同 UID)。
-                // 风险仅限第三方 App 能触发一次上滑,不涉及数据。
-                androidx.core.content.ContextCompat.RECEIVER_EXPORTED
-            )
+        if (!receiverRegistered) {
+            runCatching {
+                val f = android.content.IntentFilter(ACTION_SWIPE_NOW)
+                androidx.core.content.ContextCompat.registerReceiver(
+                    this,
+                    手动上滑,
+                    f,
+                    // 保持 EXPORTED:README 里的 adb 调试指令来自 shell(不同 UID)。
+                    // 风险仅限第三方 App 能触发一次上滑,不涉及数据。
+                    androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+                )
+            }.onSuccess {
+                receiverRegistered = true
+            }.onFailure {
+                LogBuf.add("手动上滑接收器注册失败: ${it.message}")
+            }
         }
         // 悬浮球
         ToggleBall.show(this)
@@ -123,6 +132,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (destroyed) return
         val ev = event ?: return
         val pkg = ev.packageName?.toString() ?: return
         if (pkg.startsWith("com.autoskip")) return // 不对自己 App 做动作
@@ -194,6 +204,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
      * 判定规则见 [AdRule]:严格模式下只有"关键词在树里但不可见"才动手。
      */
     private fun 执行扫描() {
+        if (destroyed) return
         if (!可以动手()) return
         // 正在回退换集时不再触发任何自动上滑
         if (correctionTarget != null) return
@@ -341,6 +352,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 swipeEpisode = episode
                 swipeAt = now
                 episodeReadRetries = 0
+                resultRetries = 0
                 AppSettings.recordSwipe(this)
             }
         }
@@ -365,6 +377,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
 
     /** 手动上滑只做一次结果确认:不计入统计、不重试、不回退。 */
     private fun checkManualSwipeResult() {
+        if (destroyed) return
         resultTask = null
         val root = rootInActiveWindow
         if (root == null) {
@@ -401,6 +414,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
      * 还是不可见 = 屏幕没变,按重试链处理。
      */
     private fun checkSwipeResult() {
+        if (destroyed) return
         resultTask = null
         // 开关被关掉就立刻掐断整条重试链,并清掉计数
         if (!可以动手()) {
@@ -419,9 +433,19 @@ class AdSkipAccessibilityService : AccessibilityService() {
         }
         val root = rootInActiveWindow
         if (root == null) {
-            handler.postDelayed(Runnable { checkSwipeResult() }, 1000L)
+            if (resultRetries < 5) {
+                resultRetries++
+                handler.postDelayed(Runnable { checkSwipeResult() }, 1000L)
+            } else {
+                LogBuf.add("连续拿不到窗口,停止本轮校验")
+                resultRetries = 0
+                swipeAttempts = 0
+                missSamples = 0
+                prevAdContext = false
+            }
             return
         }
+        resultRetries = 0
         val keywords = AppSettings.keywords(this)
         val label = keywords.joinToString("/")
         val scan = AdDetector.scan(root, keywords)
@@ -531,6 +555,11 @@ class AdSkipAccessibilityService : AccessibilityService() {
     }
 
     private fun performCorrectionSwipe() {
+        if (destroyed) return
+        if (!可以动手()) {
+            finishCorrection("开关已关闭或不在目标应用,停止回退")
+            return
+        }
         val target = correctionTarget ?: return
         val now = System.currentTimeMillis()
         if (correctionAttempts >= MAX_CORRECTIONS) {
@@ -557,7 +586,12 @@ class AdSkipAccessibilityService : AccessibilityService() {
     }
 
     private fun checkCorrection() {
+        if (destroyed) return
         correctionTask = null
+        if (!可以动手()) {
+            finishCorrection("开关已关闭或不在目标应用,停止回退")
+            return
+        }
         val target = correctionTarget ?: return
         if (lastUserScrollAt > correctionStartedAt) {
             finishCorrection("检测到用户手动翻页,停止回退")
@@ -605,6 +639,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
     }
 
     private fun retryCorrectionOrFinish(target: Int) {
+        if (destroyed) return
         if (correctionRetries < 5) {
             correctionRetries++
             correctionTask?.let { handler.removeCallbacks(it) }
@@ -641,6 +676,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
      */
     private val 手动上滑 = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            if (destroyed) return
             LogBuf.add("收到手动上滑指令")
             // 手动操作优先:取消正在进行的回退
             correctionTask?.let { handler.removeCallbacks(it) }
@@ -660,12 +696,16 @@ class AdSkipAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         scanning = false
         handler.removeCallbacks(扫描任务)
         resultTask?.let { handler.removeCallbacks(it) }
         correctionTask?.let { handler.removeCallbacks(it) }
         // 必须注销,否则服务重连后会重复注册,手动/通知栏指令会执行多次
-        runCatching { unregisterReceiver(手动上滑) }
+        if (receiverRegistered) {
+            runCatching { unregisterReceiver(手动上滑) }
+            receiverRegistered = false
+        }
         ToggleBall.hide(this)
         AdHintOverlay.hide(this)
         GuardService.stop(this)

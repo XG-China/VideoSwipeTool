@@ -25,14 +25,14 @@ android {
         applicationId = "com.autoskip.ad"
         minSdk = 26
         targetSdk = 36
-        versionCode = 149
-        versionName = "1.2.4"
+        versionCode = 150
+        versionName = "1.3.0"
     }
 
     signingConfigs {
         if (keystorePropertiesFile.exists()) {
             create("release") {
-                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
                 storePassword = keystoreProperties.getProperty("storePassword")
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
@@ -42,7 +42,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // 有正式密钥就用正式密钥,否则沿用 debug 签名以便覆盖安装旧版本
             signingConfig = if (keystorePropertiesFile.exists()) {

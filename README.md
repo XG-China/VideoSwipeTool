@@ -248,7 +248,7 @@ app/src/main/res/layout/ball_panel_row.xml   面板里的目标应用行(按 KNO
 | Compose BOM | 2024.12.01 |
 | compileSdk / targetSdk | 36(Android 16) |
 | minSdk | 26(Android 8.0) |
-| versionCode / versionName | 149 / 1.2.4 |
+| versionCode / versionName | 150 / 1.3.0 |
 
 项目自带 Gradle wrapper,无需预装 Gradle:
 
@@ -272,12 +272,19 @@ sdk.dir=C\:\\Android
 
 ### 发布签名
 
-默认 **release 变体沿用 debug 签名**,用于自用分发 —— 这样能直接覆盖安装现有的
-debug 版,不会因签名不一致被迫卸载。正式密钥准备好后,在仓库根目录创建
-`keystore.properties`(参考 `keystore.properties.example`),重新构建即可自动切换,
-该文件已被 `.gitignore` 排除。
+正式版使用仓库根目录的 `release.jks` + `keystore.properties`（两者都被 `.gitignore` 排除）。
+`keystore.properties` 里记录 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`；
+**务必单独备份这两个文件**，丢失后无法用同一签名更新已安装的正式版。
 
-> ⚠️ 从 debug 签名切到正式签名时,已安装的设备必须先卸载旧版,App 设置会被清空。
+当前提供两个产物：
+
+- `dist/AdAutoSkipper-1.3.0-release.apk`：正式 keystore 签名，适合对外分发。
+  已安装 debug 签名版的设备必须先卸载才能安装它。
+- `dist/AdAutoSkipper-1.3.0-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
+  保留统计和设置；证书显示 `Android Debug`，不适合对外分发。
+
+临时构建 debug 签名版：把 `keystore.properties` 移走后再执行 `assembleRelease` 即可
+（`app/build.gradle.kts` 会回退到 debug 签名）。
 
 ---
 

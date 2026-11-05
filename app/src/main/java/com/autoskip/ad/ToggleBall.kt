@@ -50,17 +50,29 @@ object ToggleBall {
     val isShowing: Boolean get() = ballView != null
     private val isPanelShowing: Boolean get() = panelView != null
 
+    @Volatile private var showing = false
+
     fun show(ctx: Context) {
-        if (isShowing) return
-        // 没有悬浮窗权限就绝不挂窗:HyperOS 上 addView 照样成功、窗口也注册了,
-        // 但系统不显示。此时 isShowing 会误报 true,服务的自愈重试就永远不再触发,
-        // 球会一直隐形。宁可保持 ballView=null,让重试循环继续等授权。
-        if (!android.provider.Settings.canDrawOverlays(ctx)) return
+        if (isShowing || showing) return
         // addView 必须在主线程执行(自愈重试可能来自无障碍事件线程)
         if (Looper.myLooper() != Looper.getMainLooper()) {
             handler.post { show(ctx) }
             return
         }
+        if (isShowing || showing) return
+        showing = true
+        try {
+            showInternal(ctx)
+        } finally {
+            showing = false
+        }
+    }
+
+    private fun showInternal(ctx: Context) {
+        // 没有悬浮窗权限就绝不挂窗:HyperOS 上 addView 照样成功、窗口也注册了,
+        // 但系统不显示。此时 isShowing 会误报 true,服务的自愈重试就永远不再触发,
+        // 球会一直隐形。宁可保持 ballView=null,让重试循环继续等授权。
+        if (!android.provider.Settings.canDrawOverlays(ctx)) return
         val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val size = (ctx.resources.displayMetrics.density * 44f).toInt()
         val root = LayoutInflater.from(ctx).inflate(R.layout.bubble_toggle, null) as FrameLayout
