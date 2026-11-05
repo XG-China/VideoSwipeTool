@@ -242,11 +242,12 @@ app/src/test/java/com/autoskip/ad/
 └── SettingsParseTest.kt            关键词/集数/倒计时/命中顺序回归
 
 app/src/main/res/xml/accessibility_service_config.xml
-    accessibilityEventTypes = typeWindowStateChanged | typeWindowContentChanged | typeViewScrolled
+    accessibilityEventTypes = typeWindowStateChanged | typeViewScrolled
     accessibilityFlags       = flagDefault | flagReportViewIds | flagRetrieveInteractiveWindows
     canPerformGestures        = true
     canRetrieveWindowContent  = true
     (不限定 packageNames,服务接收所有 App 事件,在代码里按目标应用集合过滤)
+    (不订阅高频 typeWindowContentChanged,UI 内容变化由 1 秒定时扫描覆盖)
 
 app/src/main/res/xml/file_paths.xml          日志导出目录(cache/logs)
 app/src/main/res/layout/bubble_toggle.xml    悬浮球布局
@@ -269,7 +270,7 @@ app/src/main/res/layout/ball_panel_row.xml   面板里的目标应用行(按 KNO
 | Compose BOM | 2024.12.01 |
 | compileSdk / targetSdk | 36(Android 16) |
 | minSdk | 26(Android 8.0) |
-| versionCode / versionName | 154 / 1.6.0 |
+| versionCode / versionName | 155 / 1.6.1 |
 
 项目自带 Gradle wrapper,无需预装 Gradle:
 
@@ -299,9 +300,9 @@ sdk.dir=C\:\\Android
 
 当前提供两个产物：
 
-- `dist/VideoSwipeTool-1.5.0-release.apk`：正式 keystore 签名，适合对外分发。
+- `dist/VideoSwipeTool-1.6.1-release.apk`：正式 keystore 签名，适合对外分发。
   已安装 debug 签名版的设备必须先卸载才能安装它。
-- `dist/VideoSwipeTool-1.5.0-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
+- `dist/VideoSwipeTool-1.6.1-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
   保留统计和设置；证书显示 `Android Debug`，不适合对外分发。
 
 临时构建 debug 签名版：把 `keystore.properties` 移走后再执行 `assembleRelease` 即可
@@ -340,10 +341,11 @@ $adb = "C:\Android\platform-tools\adb.exe"
 
 ### 检测侧
 
-**判定 = 所有关键词同时可见才不滑。** 只数 `isVisibleToUser = true` 的节点判断"可见";默认关键词「选集」和「第N集」缺任意一个就上滑。
+**判定 = 三组关键词的页面分类。** 只数 `isVisibleToUser = true` 的节点判断"可见";
+广告强关键词优先,其次是剧集页、首页,最后才是「返回」/无关键词。
 
-**代价**:首页/搜索页/榜单页通常凑不齐所有关键词,也会触发一次上滑;上升沿逻辑保证同一状态只滑一次。
-关键词可自定义,但规则不变:要凑齐所有配置的关键词。
+**代价**:首页/搜索页如果没命中首页关键词,会按广告页触发一次上滑;上升沿逻辑保证同一状态只滑一次。
+关键词可自定义,规则不写死具体词。
 
 **满屏品牌广告跳不了,不是判定问题。**
 

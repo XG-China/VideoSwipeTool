@@ -59,12 +59,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 
 private val BrandRed = Color(0xFFE53935)   // 主色:品牌红
@@ -178,14 +181,17 @@ private fun RootScreen(accConnected: Boolean) {
     }
 
     LaunchedEffect(accConnected) { accOn = accConnected }
-    LaunchedEffect(Unit) {
-        while (true) {
-            logs = LogBuf.snapshot()
-            // 悬浮窗权限随时可能在系统设置里被改,轮询才能立刻反映出来
-            overlayOn = Settings.canDrawOverlays(ctx)
-            stats = AppSettings.statsText(ctx)
-            enabledTargets = AppSettings.targetPackages(ctx)
-            delay(1000)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                logs = LogBuf.snapshot()
+                // 悬浮窗权限随时可能在系统设置里被改,轮询才能立刻反映出来
+                overlayOn = Settings.canDrawOverlays(ctx)
+                stats = AppSettings.statsText(ctx)
+                enabledTargets = AppSettings.targetPackages(ctx)
+                delay(1000)
+            }
         }
     }
 

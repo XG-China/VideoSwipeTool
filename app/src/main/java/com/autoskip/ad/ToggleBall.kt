@@ -51,12 +51,18 @@ object ToggleBall {
     private val isPanelShowing: Boolean get() = panelView != null
 
     @Volatile private var showing = false
+    @Volatile private var posted = false
 
     fun show(ctx: Context) {
         if (isShowing || showing) return
         // addView 必须在主线程执行(自愈重试可能来自无障碍事件线程)
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            handler.post { show(ctx) }
+            if (posted) return
+            posted = true
+            handler.post {
+                posted = false
+                show(ctx)
+            }
             return
         }
         if (isShowing || showing) return

@@ -2,6 +2,7 @@ package com.autoskip.ad
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
+import android.os.PowerManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
@@ -24,6 +25,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
     }
 
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val powerManager by lazy { getSystemService(PowerManager::class.java) }
     private var readyAt = 0L          // 服务刚连接后的缓冲期结束时间点(期间不自动滑)
     private var lastSwipeAt = 0L
     private var quietUntil = 0L       // 上滑后的安静期
@@ -80,6 +82,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        destroyed = false
         AppSettings.migrateConfig(this) // 清掉历史目标应用,默认由用户重新选择
         // 启动保活前台服务,防止 MIUI 冻结进程导致断连
         GuardService.start(this)
@@ -143,13 +146,13 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val ev = event ?: return
         val pkg = ev.packageName?.toString() ?: return
         if (pkg.startsWith("com.autoskip")) return // 不对自己 App 做动作
-        // 现在服务接收所有 App 的事件,这里只处理已开启的目标应用
-        if (pkg !in AppSettings.targetPackages(this)) return
-        val now = System.currentTimeMillis()
         // 记录前台包名,作为 rootInActiveWindow 短暂为 null 时的兜底
         if (ev.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             lastForegroundPkg = pkg
         }
+        // 现在服务接收所有 App 的事件,这里只处理已开启的目标应用
+        if (pkg !in AppSettings.targetPackages(this)) return
+        val now = System.currentTimeMillis()
         // 悬浮球自愈:初次连接若悬浮窗权限未授,补授权后自动重挂
         自愈悬浮球(now)
         if (!可以动手()) return
@@ -202,10 +205,14 @@ class AdSkipAccessibilityService : AccessibilityService() {
      */
     private fun 可以动手(): Boolean {
         if (!AppSettings.masterEnabled(this)) return false
+        val targets = AppSettings.targetPackages(this)
+        if (targets.isEmpty()) return false
+        // 先用事件记录的前台包名做快速判断,避免每秒都去取无障碍窗口
+        if (lastForegroundPkg.isNotEmpty() && lastForegroundPkg !in targets) return false
         val pkg = 当前包名()
         // 实在拿不到包名时不在这里拦,交给 执行扫描() 的 root 判空处理。
         if (pkg.isEmpty()) return true
-        return pkg in AppSettings.targetPackages(this)
+        return pkg in targets
     }
 
     /** 用三组关键词扫描当前页面。 */
@@ -231,6 +238,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
      */
     private fun 执行扫描() {
         if (destroyed) return
+        // 熄屏时不扫描,避免无意义的 CPU/电量消耗
+        if (!powerManager.isInteractive) return
         if (!可以动手()) return
         // 正在回退换集时不再触发任何自动上滑
         if (correctionTarget != null) return

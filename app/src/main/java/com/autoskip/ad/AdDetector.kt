@@ -85,6 +85,7 @@ object AdDetector {
         val homeHits = HashSet<String>()
         val adHits = HashSet<String>()
         var episodeHeader: String? = null
+        var episodeFallback: String? = null
         var countdownSeconds: Int? = null
         val allTexts = LinkedHashSet<String>()
         var visited = 0
@@ -123,7 +124,14 @@ object AdDetector {
                             val b = Rect().also { node.getBoundsInScreen(it) }
                             val inTopLeft = (b.top - rootBounds.top) <= screenH * 0.15 &&
                                     (b.left - rootBounds.left) <= screenW * 0.55
-                            if (inTopLeft) episodeHeader = match
+                            if (inTopLeft) {
+                                episodeHeader = match
+                            } else if (episodeFallback == null &&
+                                (full.contains('|') || full.contains('｜') || full.contains('·'))
+                            ) {
+                                // 顶部标题读不到时,用底部标题「第37集 | 剧名」兜底
+                                episodeFallback = match
+                            }
                         }
                     }
                     // 广告倒计时通常是很短的文本节点(5s / 5秒 / 广告 5)
@@ -148,7 +156,7 @@ object AdDetector {
             episodeHit = firstMatched(episodeKeywords, episodeHits),
             homeHit = firstMatched(homeKeywords, homeHits),
             adHit = firstMatched(adKeywords, adHits),
-            episodeHeader = episodeHeader,
+            episodeHeader = episodeHeader ?: episodeFallback,
             countdownSeconds = countdownSeconds
         )
     }
