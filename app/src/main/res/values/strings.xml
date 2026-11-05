@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">广告自动跳过</string>
+    <string name="accessibility_service_label">广告自动跳过服务</string>
+    <string name="accessibility_service_description">识别红果免费短剧中的应用内广告:屏幕上找不到「选集」二字时判定为广告,自动上滑跳过。仅对红果免费短剧生效,不上传任何数据。</string>
+</resources>

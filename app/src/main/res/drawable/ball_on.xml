@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  悬浮球·开:品牌红实心球。
+  早期版本是半透明白球,叠在红果的深色视频画面上白上加白几乎看不见,
+  这里改成不透明红球,深浅背景都能分辨(不描边,靠自身颜色与背景拉开)。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <gradient
+        android:type="radial"
+        android:gradientRadius="22dp"
+        android:centerX="0.35"
+        android:centerY="0.3"
+        android:startColor="#FF8A80"
+        android:centerColor="#FFE53935"
+        android:endColor="#FFC62828" />
+</shape>

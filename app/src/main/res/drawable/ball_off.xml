@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  悬浮球·关:灰球。
+  和 ball_on 一样不描边,靠颜色(红=开 / 灰=关)和"开/关"文字区分状态。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <gradient
+        android:type="radial"
+        android:gradientRadius="22dp"
+        android:centerX="0.35"
+        android:centerY="0.3"
+        android:startColor="#FFE0E0E0"
+        android:centerColor="#FF9E9E9E"
+        android:endColor="#FF616161" />
+</shape>
