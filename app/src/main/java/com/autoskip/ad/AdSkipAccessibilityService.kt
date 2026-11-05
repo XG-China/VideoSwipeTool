@@ -78,6 +78,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var resultRetries = 0                 // 拿不到窗口时的重试次数
     private var destroyed = false
     private var receiverRegistered = false
+    private var pendingNextTarget: Int? = null    // 已到 N+1,继续观察是否会滑到 N+2
+    private var pendingNextCount = 0
 
     // 定时主动扫描:红果广告可能是静态 SurfaceView(不产生无障碍事件),
     // 只靠事件驱动会漏扫 → 必须定时轮询。间隔由设置决定(默认 1 秒)。
@@ -353,6 +355,9 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 swipeAt = now
                 episodeReadRetries = 0
                 resultRetries = 0
+                // 新一轮自动上滑,取消上一轮的 N+1 观察
+                pendingNextTarget = null
+                pendingNextCount = 0
                 AppSettings.recordSwipe(this)
             }
         }
@@ -416,6 +421,11 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private fun checkSwipeResult() {
         if (destroyed) return
         resultTask = null
+        // 已经到 N+1,先进入观察期,确认不会继续滑到 N+2
+        if (pendingNextTarget != null) {
+            confirmPendingNext()
+            return
+        }
         // 开关被关掉就立刻掐断整条重试链,并清掉计数
         if (!可以动手()) {
             if (swipeAttempts > 0) LogBuf.add("开关已关闭,停止重试(本轮已滑 $swipeAttempts 次)")
@@ -426,6 +436,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
             postCorrectionUntil = 0L
             countdownUntil = 0L
             lastCountdownValue = null
+            pendingNextTarget = null
+            pendingNextCount = 0
             swipeAttempts = 0
             missSamples = 0
             prevAdContext = false
@@ -482,12 +494,13 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 }
 
                 EpisodeOutcome.Next -> {
-                    LogBuf.add("集数从第 $fromEpisode 集变为第 $currentEpisode 集,正好是下一集,结束本轮")
-                    swipeAttempts = 0
-                    missSamples = 0
-                    prevAdContext = false
-                    swipeEpisode = null
-                    overshootLockUntil = 0L
+                    // 3 秒校验只看到 N+1 还不能收工:视频流的惯性/自动连播可能继续走到 N+2。
+                    // 进入确认期,再观察最多约 6 秒。
+                    pendingNextTarget = currentEpisode
+                    pendingNextCount = 1
+                    LogBuf.add("集数从第 $fromEpisode 集变为第 $currentEpisode 集,进入下一集确认期")
+                    resultTask = Runnable { checkSwipeResult() }
+                    handler.postDelayed(resultTask!!, 1800L)
                     return
                 }
 
@@ -539,6 +552,62 @@ class AdSkipAccessibilityService : AccessibilityService() {
         if (!swipeUpOnce("第 $swipeAttempts 次重试", swipeEpisode ?: lastKnownEpisode)) {
             handler.postDelayed(Runnable { checkSwipeResult() }, 1000L)
         }
+    }
+
+    /**
+     * N+1 确认期:视频流可能因为惯性/自动连播继续走到 N+2。
+     * 观察最多约 6 秒;一旦超过目标就立即回退,否则确认停住。
+     */
+    private fun confirmPendingNext() {
+        if (destroyed) return
+        val target = pendingNextTarget ?: return
+        if (!可以动手()) {
+            pendingNextTarget = null
+            pendingNextCount = 0
+            return
+        }
+        if (lastUserScrollAt > swipeAt) {
+            LogBuf.add("确认期内检测到用户手动翻页,结束观察")
+            pendingNextTarget = null
+            pendingNextCount = 0
+            swipeAttempts = 0
+            missSamples = 0
+            prevAdContext = false
+            swipeEpisode = null
+            return
+        }
+        val root = rootInActiveWindow
+        val current = root?.let {
+            AdDetector.episodeNumber(AdDetector.scan(it, AppSettings.keywords(this)).episodeHeader)
+        }
+        if (current != null && current > target) {
+            LogBuf.add("确认期内集数变成第 $current 集,超过第 $target 集,开始回退")
+            AdHintOverlay.show(this, "检测到第${current}集,回退到第${target}集")
+            overshootLockUntil = System.currentTimeMillis() + 20_000L
+            pendingNextTarget = null
+            pendingNextCount = 0
+            startCorrection(target)
+            return
+        }
+        if ((current == null || current == target) && pendingNextCount < 3) {
+            pendingNextCount++
+            resultTask = Runnable { checkSwipeResult() }
+            handler.postDelayed(resultTask!!, 1500L)
+            return
+        }
+        finishPendingNext(current ?: target)
+    }
+
+    private fun finishPendingNext(episode: Int) {
+        LogBuf.add("已确认停留在第 $episode 集")
+        AdHintOverlay.show(this, "已上滑到第${episode}集")
+        pendingNextTarget = null
+        pendingNextCount = 0
+        swipeAttempts = 0
+        missSamples = 0
+        prevAdContext = false
+        swipeEpisode = null
+        overshootLockUntil = 0L
     }
 
     /**
@@ -686,6 +755,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
             postCorrectionUntil = 0L
             countdownUntil = 0L
             lastCountdownValue = null
+            pendingNextTarget = null
+            pendingNextCount = 0
             lastSwipeAt = 0L
             quietUntil = 0L
             resumeScanAt = 0L
@@ -698,6 +769,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         destroyed = true
         scanning = false
+        pendingNextTarget = null
+        pendingNextCount = 0
         handler.removeCallbacks(扫描任务)
         resultTask?.let { handler.removeCallbacks(it) }
         correctionTask?.let { handler.removeCallbacks(it) }
