@@ -59,6 +59,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var lastCountdownValue: Int? = null   // 上一次看到的倒计时秒数
     private var countdownValueAt = 0L
     private var episodeReadRetries = 0            // 换页动画期间读不到集数时重试次数
+    private var episodeHintShown = false           // 本轮上滑是否已经提示过集数
     private var resultRetries = 0                 // 拿不到窗口时的重试次数
     private var destroyed = false
     private var receiverRegistered = false
@@ -401,6 +402,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 swipeEpisode = episode
                 swipeAt = now
                 episodeReadRetries = 0
+                episodeHintShown = false
                 resultRetries = 0
                 // 新一轮自动上滑,取消上一轮的 N+1 观察
                 pendingNextTarget = null
@@ -527,10 +529,13 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 if (lastUserScrollAt > swipeAt) " (用户已翻页)" else ""
         )
         if (lastUserScrollAt <= swipeAt) {
-            AdHintOverlay.show(
-                this,
-                currentEpisode?.let { "已上滑到第${it}集" } ?: "已上滑(集数未识别)"
-            )
+            if (!episodeHintShown) {
+                AdHintOverlay.show(
+                    this,
+                    currentEpisode?.let { "已上滑到第${it}集" } ?: "已上滑(集数未识别)"
+                )
+                episodeHintShown = true
+            }
         }
 
         // 误滑换集检测:手势前记下的集数,手势后变了 → 这一滑跨集了。
@@ -666,7 +671,6 @@ class AdSkipAccessibilityService : AccessibilityService() {
 
     private fun finishPendingNext(episode: Int) {
         LogBuf.add("已确认停留在第 $episode 集")
-        AdHintOverlay.show(this, "已上滑到第${episode}集")
         pendingNextTarget = null
         pendingNextCount = 0
         swipeAttempts = 0
