@@ -2,6 +2,7 @@ package com.autoskip.ad
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import androidx.core.content.FileProvider
 import java.io.File
 import java.text.SimpleDateFormat
@@ -28,12 +29,24 @@ object LogExporter {
                     appendLine("视频上滑工具运行日志")
                     appendLine("版本: $version")
                     appendLine("时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
+                    appendLine("设备: ${Build.MANUFACTURER} ${Build.MODEL} / Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
                     appendLine("统计: ${AppSettings.statsText(ctx)}")
                     appendLine("自动回退: ${AppSettings.autoCorrectEpisode(ctx)}")
+                    val targets = AppSettings.targetPackages(ctx).map { pkg ->
+                        AppSettings.KNOWN_APPS.firstOrNull { it.pkg == pkg }?.name ?: pkg
+                    }.joinToString("/").ifEmpty { "无" }
+                    appendLine("目标应用: $targets")
                     appendLine("剧集关键词: ${AppSettings.episodeKeywords(ctx).joinToString("/")}")
                     appendLine("首页关键词: ${AppSettings.homeKeywords(ctx).joinToString("/")}")
                     appendLine("广告关键词: ${AppSettings.adKeywords(ctx).joinToString("/")}")
                     appendLine("扫描间隔: ${AppSettings.scanIntervalMs(ctx)} ms")
+                    val timings = Timing.entries.joinToString(" ") { timing ->
+                        val value = AppSettings.timing(ctx, timing)
+                        val text = if (timing.unit == "s") "%.1f s".format(value / 1000.0)
+                        else "${value.toInt()} ${timing.unit}"
+                        "${timing.label}=$text"
+                    }
+                    appendLine("时序: $timings")
                     appendLine("----------------------------------------")
                     LogBuf.snapshot().forEach { appendLine(it) }
                 }

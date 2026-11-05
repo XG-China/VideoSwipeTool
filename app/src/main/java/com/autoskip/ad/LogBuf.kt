@@ -7,7 +7,7 @@ import java.util.Locale
 
 /** 内存环形日志,供 App 内日志区展示,便于调试验证。 */
 object LogBuf {
-    private const val MAX = 120
+    private const val MAX = 300
     private val buf = ArrayDeque<String>()
     private val fmt = SimpleDateFormat("HH:mm:ss", Locale.US)
 

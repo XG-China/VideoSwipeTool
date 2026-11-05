@@ -210,14 +210,6 @@ private fun RootScreen(accConnected: Boolean) {
                 onOpenOverlay = { ctx.startActivity(overlaySettingsIntent(ctx)) }
             )
             UsageCard(onOpenApp = { launchTargetApp(ctx) })
-            TargetAppsCard(
-                enabled = enabledTargets,
-                onToggle = { app, on ->
-                    AppSettings.setTargetPackage(ctx, app.pkg, on)
-                    enabledTargets = AppSettings.targetPackages(ctx)
-                    LogBuf.add("目标应用:${app.name} ${if (on) "开启" else "关闭"}")
-                }
-            )
             RuleSettingsCard(
                 statsText = stats,
                 onStatsReset = {
@@ -226,6 +218,15 @@ private fun RootScreen(accConnected: Boolean) {
                     LogBuf.add("统计已重置")
                 }
             )
+            TargetAppsCard(
+                enabled = enabledTargets,
+                onToggle = { app, on ->
+                    AppSettings.setTargetPackage(ctx, app.pkg, on)
+                    enabledTargets = AppSettings.targetPackages(ctx)
+                    LogBuf.add("目标应用:${app.name} ${if (on) "开启" else "关闭"}")
+                }
+            )
+            TimingCard()
             LogCard(
                 logs = logs,
                 onClear = {
@@ -421,8 +422,7 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
             SectionTitle("规则设置")
 
             Text(
-                "用关键词判断当前页面:剧集页和首页不滑;广告页上滑。" +
-                    "剧集页命中「选集/第N集」,首页命中「关注/推荐/首页」,广告页命中「返回/上滑继续看短剧/点击进入直播间」;" +
+                "用关键词判断当前页面:剧集页和首页不滑,广告页上滑;三组关键词都可以自定义。" +
                     "如果什么都没命中,也按广告页上滑。广告里的「返回」是弱信号,有剧集/首页关键词时不生效。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -434,7 +434,7 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
                     episodeKeywords = it
                     savedHint = ""
                 },
-                label = { Text("剧集页关键词(选集/第N集)") },
+                label = { Text("剧集页关键词") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
@@ -446,7 +446,7 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
                     homeKeywords = it
                     savedHint = ""
                 },
-                label = { Text("首页关键词(关注/推荐/首页)") },
+                label = { Text("首页关键词") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
@@ -458,7 +458,7 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
                     adKeywords = it
                     savedHint = ""
                 },
-                label = { Text("广告页关键词(返回/上滑继续看短剧/点击进入直播间)") },
+                label = { Text("广告页关键词") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
@@ -513,6 +513,86 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onStatsReset) { Text("重置统计") }
                 TextButton(onClick = { LogExporter.share(ctx) }) { Text("导出运行日志") }
+            }
+        }
+    }
+}
+
+// ---------- 高级时序 ----------
+@Composable
+private fun TimingCard() {
+    val ctx = LocalContext.current
+    var expanded by remember { mutableStateOf(false) }
+    var values by remember {
+        mutableStateOf(Timing.entries.associateWith { AppSettings.timing(ctx, it) })
+    }
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    SectionTitle("高级时序")
+                    Text(
+                        "扫描、冷却、重试、悬浮球等时间参数,点击展开",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    if (expanded) "收起" else "展开",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = BrandRed
+                )
+            }
+
+            if (expanded) {
+                Text(
+                    "修改立即生效;服务连接缓冲期在下一次服务连接时生效。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Timing.entries.forEach { timing ->
+                    val value = values[timing] ?: timing.default
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            timing.label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            if (timing.unit == "s") "%.1f s".format(value / 1000.0)
+                            else "${value.toInt()} ${timing.unit}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Slider(
+                        value = value.toFloat(),
+                        onValueChange = { v ->
+                            val newValue = v.toLong()
+                            values = values + (timing to newValue)
+                            AppSettings.setTiming(ctx, timing, newValue)
+                        },
+                        onValueChangeFinished = {
+                            val v = values[timing] ?: timing.default
+                            val text = if (timing.unit == "s") "%.1f s".format(v / 1000.0)
+                            else "${v.toInt()} ${timing.unit}"
+                            LogBuf.add("[时序] ${timing.label}=$text")
+                        },
+                        valueRange = timing.min.toFloat()..timing.max.toFloat(),
+                        steps = timing.sliderSteps
+                    )
+                }
+                TextButton(onClick = {
+                    AppSettings.resetTimings(ctx)
+                    values = Timing.entries.associateWith { it.default }
+                    LogBuf.add("高级时序已恢复默认")
+                }) { Text("恢复默认") }
             }
         }
     }

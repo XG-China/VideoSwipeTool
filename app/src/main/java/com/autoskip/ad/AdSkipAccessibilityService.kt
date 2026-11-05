@@ -16,18 +16,6 @@ import android.view.accessibility.AccessibilityNodeInfo
 class AdSkipAccessibilityService : AccessibilityService() {
 
     companion object {
-        private const val POST_SWIPE_PAUSE_MS = 3000L    // 手势送达后暂停操作 3 秒,再恢复扫描
-        private const val READY_BUFFER_MS = 4000L        // 服务连接后的缓冲期(期间不自动滑)
-        private const val QUIET_MS = 3000L               // 上滑后的安静期
-        private const val SWIPE_COOLDOWN_MS = 3000L      // 两次自动上滑最小间隔
-        private const val USER_SCROLL_GUARD_MS = 3000L   // 用户手动翻页后的守卫时间
-        private const val AD_DEBOUNCE_MS = 1000L         // 判定防抖:持续消失≥该时长才算结束
-        private const val AUTO_SWIPE_WINDOW_MS = 1500L   // 自动上滑引发的滚动时间窗(不算用户操作)
-        private const val BALL_RETRY_MS = 15000L         // 悬浮球自愈重试间隔
-        private const val BALL_MISSING_LOG_MS = 30000L   // "悬浮球挂不上"的警告节流
-        private const val AD_STUCK_LOG_MS = 30000L       // 判定持续成立但已滑过时的日志节流
-        private const val MAX_SWIPE_ATTEMPTS = 10         // 观看时长限制的连滑上限
-        private const val REQUIRED_MISS_SAMPLES = 3       // 重试前要连续几次确认"关键词不可见"
         private const val MAX_CORRECTIONS = 3              // 误滑换集后最多下滑回退几次
         private const val CORRECTION_PAUSE_MS = 2500L      // 每次回退后等待页面稳定再检查
 
@@ -77,6 +65,9 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var lastPageKind: PageKind? = null
     private var lastPageLogAt = 0L
 
+    /** 读取当前时序设置(修改后立即生效)。 */
+    private fun t(timing: Timing): Long = AppSettings.timing(this, timing)
+
     // 定时主动扫描:红果广告可能是静态 SurfaceView(不产生无障碍事件),
     // 只靠事件驱动会漏扫 → 必须定时轮询。间隔由设置决定(默认 1 秒)。
     private val 扫描任务 = object : Runnable {
@@ -119,12 +110,30 @@ class AdSkipAccessibilityService : AccessibilityService() {
             }
         }
         // 重连/启动后缓冲期内不自动滑:防止恢复瞬间把正在看的视频划走
-        readyAt = System.currentTimeMillis() + READY_BUFFER_MS
+        readyAt = System.currentTimeMillis() + t(Timing.READY_BUFFER)
         // 启动定时扫描(静态广告无事件也能被发现)
         if (!scanning) {
             scanning = true
             handler.postDelayed(扫描任务, AppSettings.scanIntervalMs(this))
         }
+        val version = runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName
+        }.getOrNull().orEmpty()
+        val targets = AppSettings.targetPackages(this).map { pkg ->
+            AppSettings.KNOWN_APPS.firstOrNull { it.pkg == pkg }?.name ?: pkg
+        }.joinToString("/").ifEmpty { "无" }
+        LogBuf.add("[启动] v$version 目标=$targets")
+        LogBuf.add(
+            "[关键词] 剧集=${AppSettings.episodeKeywords(this).joinToString("/")} " +
+                "首页=${AppSettings.homeKeywords(this).joinToString("/")} " +
+                "广告=${AppSettings.adKeywords(this).joinToString("/")}"
+        )
+        LogBuf.add(
+            "[时序] 扫描=${AppSettings.scanIntervalMs(this)}ms " +
+                "缓冲=${t(Timing.READY_BUFFER)}ms 守卫=${t(Timing.USER_SCROLL_GUARD)}ms " +
+                "冷却=${t(Timing.SWIPE_COOLDOWN)}ms 安静=${t(Timing.QUIET)}ms " +
+                "复核=${t(Timing.REQUIRED_MISS_SAMPLES)}次 连滑=${t(Timing.MAX_SWIPE_ATTEMPTS)}次"
+        )
         LogBuf.add("无障碍服务已连接,自动广告跳过已就绪(${AppSettings.statsText(this)})")
         broadcastConnected()
     }
@@ -148,7 +157,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         // 区分"用户手动翻页"与"我们的自动上滑"
         if (ev.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
             // 回退过程中给下滑手势更长的窗口,避免把延迟到达的滚动事件误判成用户翻页
-            val autoWindow = if (correctionTarget != null) CORRECTION_PAUSE_MS + 500L else AUTO_SWIPE_WINDOW_MS
+            val autoWindow = if (correctionTarget != null) CORRECTION_PAUSE_MS + 500L else t(Timing.AUTO_SWIPE_WINDOW)
             if (autoSwipeAt == 0L || now - autoSwipeAt > autoWindow) {
                 lastUserScrollAt = now
                 postCorrectionUntil = 0L // 用户接管,解除回退后的静默
@@ -172,13 +181,13 @@ class AdSkipAccessibilityService : AccessibilityService() {
             return
         }
         if (!android.provider.Settings.canDrawOverlays(this)) {
-            if (now - lastBallMissingLogAt > BALL_MISSING_LOG_MS) {
+            if (now - lastBallMissingLogAt > t(Timing.BALL_MISSING_LOG)) {
                 lastBallMissingLogAt = now
                 LogBuf.add("悬浮球挂不上:未授予「显示在其他应用上层」权限,授权后会自动出现")
             }
             return
         }
-        if (now - lastBallRetryAt < BALL_RETRY_MS) return
+        if (now - lastBallRetryAt < t(Timing.BALL_RETRY)) return
         lastBallRetryAt = now
         ToggleBall.show(this)
     }
@@ -246,17 +255,24 @@ class AdSkipAccessibilityService : AccessibilityService() {
         if (page != lastPageKind && now - lastPageLogAt >= 3000L) {
             lastPageKind = page
             lastPageLogAt = now
-            LogBuf.add("页面判定:${页面标签(scan)}")
+            LogBuf.add(
+                "[页面] ${页面标签(scan)} | 剧集=${scan.episodeHit ?: "-"} " +
+                    "首页=${scan.homeHit ?: "-"} 广告=${scan.adHit ?: "-"} " +
+                    "集数=${scan.episodeHeader ?: "-"} 文字=${scan.textCount}"
+            )
         }
 
         val canSwipeAd = now >= readyAt && now >= quietUntil
-                && now - lastSwipeAt >= SWIPE_COOLDOWN_MS && now - lastUserScrollAt >= USER_SCROLL_GUARD_MS
+                && now - lastSwipeAt >= t(Timing.SWIPE_COOLDOWN) && now - lastUserScrollAt >= t(Timing.USER_SCROLL_GUARD)
 
         when (page) {
             PageKind.AD -> {
                 // 广告倒计时未结束时先等,结束后再上滑
                 val countdown = scan.countdownSeconds
                 if (countdown != null) {
+                    if (lastCountdownValue == null) {
+                        LogBuf.add("[倒计时] 检测到 ${countdown}s,等待结束后再上滑")
+                    }
                     if (countdown != lastCountdownValue) {
                         lastCountdownValue = countdown
                         countdownValueAt = now
@@ -267,11 +283,14 @@ class AdSkipAccessibilityService : AccessibilityService() {
                         countdownUntil = 0L
                     }
                 } else {
+                    if (lastCountdownValue != null) {
+                        LogBuf.add("[倒计时] 结束,继续判定")
+                    }
                     lastCountdownValue = null
                 }
                 if (now < countdownUntil) {
                     lastAdClearAt = 0L
-                    if (now - lastStuckLogAt >= AD_STUCK_LOG_MS) {
+                    if (now - lastStuckLogAt >= t(Timing.AD_STUCK_LOG)) {
                         lastStuckLogAt = now
                         LogBuf.add("检测到广告倒计时,等待结束再上滑(约 ${((countdownUntil - now) / 1000) + 1}s)")
                     }
@@ -279,7 +298,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 }
                 // 回退刚完成时先静默一会儿,避免同一波广告立刻又触发上滑跳集
                 if (now < postCorrectionUntil) {
-                    if (now - lastStuckLogAt >= AD_STUCK_LOG_MS) {
+                    if (now - lastStuckLogAt >= t(Timing.AD_STUCK_LOG)) {
                         lastStuckLogAt = now
                         LogBuf.add("回退后静默中,暂不自动上滑(剩余 ${(postCorrectionUntil - now) / 1000}s)")
                     }
@@ -287,7 +306,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 }
                 // 上一次自动上滑把集数滑变了:锁定一段时间,绝不再补滑
                 if (now < overshootLockUntil) {
-                    if (now - lastStuckLogAt >= AD_STUCK_LOG_MS) {
+                    if (now - lastStuckLogAt >= t(Timing.AD_STUCK_LOG)) {
                         lastStuckLogAt = now
                         LogBuf.add("误滑换集锁定中,暂停自动上滑(剩余 ${(overshootLockUntil - now) / 1000}s)")
                     }
@@ -310,7 +329,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
                         LogBuf.add("$reason($pkg): 上滑| 文字数=${scan.textCount}")
                         swipeUpOnce("$reason,自动上滑", lastKnownEpisode, hitKeyword = scan.adHit)
                     }
-                } else if (now - lastStuckLogAt >= AD_STUCK_LOG_MS) {
+                } else if (now - lastStuckLogAt >= t(Timing.AD_STUCK_LOG)) {
                     lastStuckLogAt = now
                     LogBuf.add("广告页持续成立,等广告的观看时长限制(第 $swipeAttempts 次) 文字数=${scan.textCount}")
                 }
@@ -323,7 +342,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 lastCountdownValue = null
                 // 防抖动:判定需持续消失 ≥1 秒才算真结束
                 if (lastAdClearAt == 0L) lastAdClearAt = now
-                if (now - lastAdClearAt >= AD_DEBOUNCE_MS) {
+                if (now - lastAdClearAt >= t(Timing.AD_DEBOUNCE)) {
                     prevAdContext = false
                     swipeAttempts = 0
                     missSamples = 0
@@ -348,9 +367,9 @@ class AdSkipAccessibilityService : AccessibilityService() {
     ): Boolean {
         val now = System.currentTimeMillis()
         if (now < quietUntil) return false
-        if (now - lastSwipeAt < SWIPE_COOLDOWN_MS) return false
+        if (now - lastSwipeAt < t(Timing.SWIPE_COOLDOWN)) return false
         lastSwipeAt = now
-        quietUntil = now + QUIET_MS
+        quietUntil = now + t(Timing.QUIET)
         if (manual) {
             swipeAttempts = 0
         } else {
@@ -360,7 +379,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val 已送达 = 方式 != null
         if (已送达) {
             autoSwipeAt = now
-            resumeScanAt = now + POST_SWIPE_PAUSE_MS
+            resumeScanAt = now + t(Timing.POST_SWIPE_PAUSE)
             if (manual) {
                 // 手动操作不消耗自动判定的上升沿,也不参与换集校正
                 missSamples = 0
@@ -381,9 +400,11 @@ class AdSkipAccessibilityService : AccessibilityService() {
             }
         }
         val attempt = if (manual) "手动" else "第 $swipeAttempts 次"
+        val start = episode?.let { "第${it}集" } ?: "集数未知"
+        val quietSeconds = t(Timing.QUIET) / 1000.0
         LogBuf.add(
-            if (已送达) "已上滑($reason,$attempt) → 3 秒后校验${if (manual) "(手动不计入统计)" else ""}"
-            else "手势未能送达($reason),3 秒后重试"
+            if (已送达) "[上滑] $reason,$attempt,起点=$start → ${"%.1f".format(quietSeconds)} 秒后校验${if (manual) "(手动不计入统计)" else ""}"
+            else "[上滑] 手势未能送达($reason),${"%.1f".format(quietSeconds)} 秒后重试"
         )
         AdHintOverlay.show(
             this,
@@ -396,7 +417,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         )
         resultTask?.let { handler.removeCallbacks(it) }
         resultTask = Runnable { if (manual) checkManualSwipeResult() else checkSwipeResult() }
-        handler.postDelayed(resultTask!!, QUIET_MS)
+        handler.postDelayed(resultTask!!, t(Timing.QUIET))
         return true
     }
 
@@ -490,6 +511,12 @@ class AdSkipAccessibilityService : AccessibilityService() {
             return
         }
         // 校验时把实际落点告诉用户(用户手动翻过页时不冒充自动上滑的结果)
+        val elapsed = if (swipeAt > 0) System.currentTimeMillis() - swipeAt else 0L
+        LogBuf.add(
+            "[校验] ${elapsed}ms 后: 页面=${页面标签(scan)} " +
+                "集数=${currentEpisode?.let { "第${it}集" } ?: "未知"}" +
+                if (lastUserScrollAt > swipeAt) " (用户已翻页)" else ""
+        )
         if (lastUserScrollAt <= swipeAt) {
             AdHintOverlay.show(
                 this,
@@ -566,17 +593,19 @@ class AdSkipAccessibilityService : AccessibilityService() {
             return
         }
         // 仍是广告页,继续走复核/重试链
-        if (missSamples < REQUIRED_MISS_SAMPLES) {
+        val requiredMiss = t(Timing.REQUIRED_MISS_SAMPLES).toInt()
+        if (missSamples < requiredMiss) {
             missSamples++
             handler.postDelayed(Runnable { checkSwipeResult() }, AppSettings.scanIntervalMs(this))
             return
         }
         missSamples = 0
-        if (swipeAttempts >= MAX_SWIPE_ATTEMPTS) {
-            LogBuf.add("已连滑 $MAX_SWIPE_ATTEMPTS 次仍停留在广告页,停止重试(可能是不给跳的插屏广告)")
+        val maxAttempts = t(Timing.MAX_SWIPE_ATTEMPTS).toInt()
+        if (swipeAttempts >= maxAttempts) {
+            LogBuf.add("已连滑 $maxAttempts 次仍停留在广告页,停止重试(可能是不给跳的插屏广告)")
             return
         }
-        LogBuf.add("上滑后仍是广告页(已复核 $REQUIRED_MISS_SAMPLES 次)→ 第 $swipeAttempts 次重试")
+        LogBuf.add("上滑后仍是广告页(已复核 $requiredMiss 次)→ 第 $swipeAttempts 次重试")
         if (!swipeUpOnce("第 $swipeAttempts 次重试", swipeEpisode ?: lastKnownEpisode, hitKeyword = scan.adHit)) {
             handler.postDelayed(Runnable { checkSwipeResult() }, 1000L)
         }
@@ -669,7 +698,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         }
         correctionAttempts++
         autoSwipeAt = now // 让我们自己下滑引发的滚动不算用户翻页
-        quietUntil = now + QUIET_MS
+        quietUntil = now + t(Timing.QUIET)
         resumeScanAt = now + CORRECTION_PAUSE_MS
         val done = GestureKit.swipeDown(this)
         LogBuf.add(

@@ -152,6 +152,20 @@ object AppSettings {
         sp(ctx).edit().putLong("scan_interval_ms", ms.coerceIn(MIN_SCAN_MS, MAX_SCAN_MS)).apply()
     }
 
+    // ---------- 高级时序 ----------
+    fun timing(ctx: Context, timing: Timing): Long =
+        sp(ctx).getLong(timing.key, timing.default).coerceIn(timing.min, timing.max)
+
+    fun setTiming(ctx: Context, timing: Timing, value: Long) {
+        sp(ctx).edit().putLong(timing.key, value.coerceIn(timing.min, timing.max)).apply()
+    }
+
+    fun resetTimings(ctx: Context) {
+        val edit = sp(ctx).edit()
+        Timing.entries.forEach { edit.putLong(it.key, it.default) }
+        edit.apply()
+    }
+
     // ---------- 误滑换集自动回退 ----------
     /**
      * 开启后:自动上滑把集数从第 N 集跳到第 N+2 集或更远时,
