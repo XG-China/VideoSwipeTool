@@ -29,7 +29,7 @@ object LogExporter {
                     appendLine("版本: $version")
                     appendLine("时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
                     appendLine("统计: ${AppSettings.statsText(ctx)}")
-                    appendLine("严格判定: ${AppSettings.strictMode(ctx)}")
+                    appendLine("自动回退: ${AppSettings.autoCorrectEpisode(ctx)}")
                     appendLine("关键词: ${AppSettings.keywords(ctx).joinToString("/")}")
                     appendLine("扫描间隔: ${AppSettings.scanIntervalMs(ctx)} ms")
                     appendLine("----------------------------------------")

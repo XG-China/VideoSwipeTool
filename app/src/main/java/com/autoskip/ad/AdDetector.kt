@@ -6,15 +6,14 @@ import android.view.accessibility.AccessibilityNodeInfo
 /**
  * 一次屏幕扫描的结果。
  *
- * @param keywordVisible    所有配置的关键词是否都可见(严格判定用)
- * @param anyKeywordVisible 是否至少有一个关键词可见(宽松判定用)
+ * @param keywordVisible    所有配置的关键词是否都可见
  * @param keywordPresent    是否至少有一个关键词存在于 UI 树(不看可见性,日志用)
  * @param textCount         全树去重文字总数
  * @param episodeHeader     顶部左侧识别到的「第X集」标题,没有则为 null
+ * @param countdownSeconds  识别到的广告倒计时秒数,没有则为 null
  */
 data class AdScan(
     val keywordVisible: Boolean,
-    val anyKeywordVisible: Boolean,
     val keywordPresent: Boolean,
     val textCount: Int,
     val episodeHeader: String? = null,
@@ -24,9 +23,9 @@ data class AdScan(
 /**
  * 扫描规则:
  *
- *   严格判定:屏幕上同时有「选集」和「第N集」才不滑;缺任意一个就上滑。
- *   宽松判定:只要有一个关键词可见就不滑。
+ *   配置里的所有关键词同时可见 → 不滑;缺任意一个 → 上滑。
  *
+ * 默认关键词是「选集」和「第N集」;换成别的关键词也遵循同一条规则。
  * 「第N集」里的 N 是通配符,匹配第1集、第16集、第1000集等任意数字。
  * 纯本地 UI 树解析,不联网、不 OCR、不点按钮。
  */
@@ -110,7 +109,6 @@ object AdDetector {
 
         return AdScan(
             keywordVisible = visible.size >= required.size,
-            anyKeywordVisible = visible.isNotEmpty(),
             keywordPresent = present.isNotEmpty(),
             textCount = allTexts.size,
             episodeHeader = episodeHeader,

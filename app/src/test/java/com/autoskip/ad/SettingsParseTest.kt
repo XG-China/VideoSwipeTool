@@ -65,6 +65,17 @@ class SettingsParseTest {
     }
 
     @Test
+    fun `旧版本默认关键词升级后补齐第N集`() {
+        assertEquals(listOf("选集", "第N集"), AppSettings.normalizeKeywords(listOf("选集")))
+    }
+
+    @Test
+    fun `自定义关键词不会被强行追加第N集`() {
+        assertEquals(listOf("广告", "跳过"), AppSettings.normalizeKeywords(listOf("广告", "跳过")))
+        assertEquals(listOf("选集", "跳过"), AppSettings.normalizeKeywords(listOf("选集", "跳过")))
+    }
+
+    @Test
     fun `识别广告倒计时`() {
         assertEquals(5, AdDetector.findCountdown("5s"))
         assertEquals(5, AdDetector.findCountdown("5秒"))

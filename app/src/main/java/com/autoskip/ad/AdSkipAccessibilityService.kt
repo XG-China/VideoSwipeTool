@@ -214,8 +214,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val scan = AdDetector.scan(root, keywords)
         // 记录最近一次看到的集数,作为"上滑是否换集"的基准
         AdDetector.episodeNumber(scan.episodeHeader)?.let { lastKnownEpisode = it }
-        val strict = AppSettings.strictMode(this)
-        val state = AdRule.classify(scan, strict)
+        val state = AdRule.classify(scan)
 
         val canSwipeAd = now >= readyAt && now >= quietUntil
                 && now - lastSwipeAt >= SWIPE_COOLDOWN_MS && now - lastUserScrollAt >= USER_SCROLL_GUARD_MS

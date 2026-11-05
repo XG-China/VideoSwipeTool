@@ -88,15 +88,15 @@ object AppSettings {
             .ifEmpty { DEFAULT_KEYWORDS }
     }
 
-    fun keywords(ctx: Context): List<String> {
-        val parsed = parseKeywords(sp(ctx).getString("keywords", null))
-        // 新规则要求「选集 + 第N集」同时存在;旧版本只存了「选集」时自动补上
-        return if (parsed.any { AdDetector.isEpisodePatternKeyword(it) }) {
-            parsed
-        } else {
-            parsed + "第N集"
-        }
-    }
+    fun keywords(ctx: Context): List<String> =
+        normalizeKeywords(parseKeywords(sp(ctx).getString("keywords", null)))
+
+    /**
+     * 旧版本的默认值是单独一个「选集」;升级时补成「选集 + 第N集」。
+     * 用户自定义的其他关键词原样保留,不会强行追加「第N集」。
+     */
+    fun normalizeKeywords(parsed: List<String>): List<String> =
+        if (parsed == listOf("选集")) DEFAULT_KEYWORDS else parsed
 
     fun setKeywords(ctx: Context, raw: String) {
         sp(ctx).edit().putString("keywords", parseKeywords(raw).joinToString(",")).apply()
@@ -113,15 +113,6 @@ object AppSettings {
     fun setScanIntervalMs(ctx: Context, ms: Long) {
         sp(ctx).edit().putLong("scan_interval_ms", ms.coerceIn(MIN_SCAN_MS, MAX_SCAN_MS)).apply()
     }
-
-    // ---------- 严格判定 ----------
-    /**
-     * 严格模式(默认开):只有「关键词在 UI 树里存在但不可见」才判定为广告。
-     * 首页/搜索页/榜单页根本没有关键词节点,因此不会被误滑;
-     * 关闭后回到旧规则:找不到可见关键词就上滑。
-     */
-    fun strictMode(ctx: Context): Boolean = sp(ctx).getBoolean("strict_mode", true)
-    fun setStrictMode(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("strict_mode", v).apply()
 
     // ---------- 误滑换集自动回退 ----------
     /**

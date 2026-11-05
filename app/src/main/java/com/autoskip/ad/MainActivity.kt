@@ -318,7 +318,7 @@ private fun UsageCard(onOpenApp: () -> Unit) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SectionTitle("用法")
             Text(
-                "播放页同时有「选集」和「第N集」时不动;缺一个就自动上滑。",
+                "屏幕上同时出现所有关键词时不动;缺任意一个就自动上滑。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -338,7 +338,6 @@ private fun UsageCard(onOpenApp: () -> Unit) {
 @Composable
 private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
     val ctx = LocalContext.current
-    var strict by remember { mutableStateOf(AppSettings.strictMode(ctx)) }
     var keywords by remember { mutableStateOf(AppSettings.keywords(ctx).joinToString("、")) }
     var intervalMs by remember { mutableStateOf(AppSettings.scanIntervalMs(ctx).toInt()) }
     var savedHint by remember { mutableStateOf("") }
@@ -349,10 +348,9 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
         AppSettings.setScanIntervalMs(ctx, intervalMs.toLong())
         keywords = AppSettings.keywords(ctx).joinToString("、")
         intervalMs = AppSettings.scanIntervalMs(ctx).toInt()
-        savedHint = if (AppSettings.strictMode(ctx)) "已保存(严格判定)" else "已保存(宽松判定)"
+        savedHint = "已保存"
         LogBuf.add(
-            "规则已更新:关键词=${AppSettings.keywords(ctx).joinToString("/")}, " +
-                "间隔=${intervalMs}ms, 严格=${AppSettings.strictMode(ctx)}"
+            "规则已更新:关键词=${AppSettings.keywords(ctx).joinToString("/")}, 间隔=${intervalMs}ms"
         )
     }
 
@@ -360,24 +358,23 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             SectionTitle("规则设置")
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("严格判定", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        "屏幕上同时有「选集」和「第N集」才不滑;缺任意一个就上滑。关闭后只要有一个关键词可见就不滑",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = strict,
-                    onCheckedChange = {
-                        strict = it
-                        AppSettings.setStrictMode(ctx, it)
-                        LogBuf.add("严格判定已${if (it) "开启" else "关闭"}")
-                    }
-                )
-            }
+            Text(
+                "判定方式:所有关键词同时可见才不滑,缺任意一个就上滑。关键词可以改成别的,规则不变。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            OutlinedTextField(
+                value = keywords,
+                onValueChange = {
+                    keywords = it
+                    savedHint = ""
+                },
+                label = { Text("判定关键词(逗号分隔,N=任意数字)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+            )
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -397,18 +394,6 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
                     }
                 )
             }
-
-            OutlinedTextField(
-                value = keywords,
-                onValueChange = {
-                    keywords = it
-                    savedHint = ""
-                },
-                label = { Text("判定关键词(逗号分隔,N=任意数字)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
-            )
 
             Text(
                 "扫描间隔:${intervalMs} ms",
