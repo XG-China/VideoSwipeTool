@@ -111,6 +111,34 @@ object AppSettings {
     fun strictMode(ctx: Context): Boolean = sp(ctx).getBoolean("strict_mode", true)
     fun setStrictMode(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("strict_mode", v).apply()
 
+    // ---------- 高级规则(类易语言 如果/如果真) ----------
+    val DEFAULT_RULE_TEXT = """
+        # 默认规则:等价于严格判定
+        # 信号:可见关键词、存在关键词、有集数、集数、文字数、严格模式/宽松模式
+        # 动作:上滑、不动作
+        如果 可见关键词
+            不动作
+        否则如果 存在关键词
+            上滑
+        否则如果 有集数
+            上滑
+        否则
+            不动作
+        结束如果
+    """.trimIndent()
+
+    fun advancedRulesEnabled(ctx: Context): Boolean =
+        sp(ctx).getBoolean("advanced_rules_enabled", false)
+
+    fun setAdvancedRulesEnabled(ctx: Context, v: Boolean) =
+        sp(ctx).edit().putBoolean("advanced_rules_enabled", v).apply()
+
+    fun advancedRules(ctx: Context): String =
+        sp(ctx).getString("advanced_rules", null) ?: DEFAULT_RULE_TEXT
+
+    fun setAdvancedRules(ctx: Context, text: String) =
+        sp(ctx).edit().putString("advanced_rules", text).apply()
+
     // ---------- 累计统计 ----------
     fun totalSwipes(ctx: Context): Int = sp(ctx).getInt("stat_swipes", 0)
     fun totalSkips(ctx: Context): Int = sp(ctx).getInt("stat_skips", 0)

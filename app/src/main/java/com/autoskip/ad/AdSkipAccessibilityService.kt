@@ -59,6 +59,13 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var scanning = false      // 防止重复启动扫描循环
     private var lastForegroundPkg = ""  // 事件里记录的前台包名,拿不到窗口时的兜底
     private var lastUnknownLogAt = 0L
+    private var lastKnownEpisode: Int? = null   // 最近一次看到的「第X集」
+    private var swipeEpisode: Int? = null       // 发起手势时所在的集数(防误滑换集的基准)
+    private var swipeAt = 0L                    // 发起手势的时刻
+    private var overshootLockUntil = 0L          // 误滑换集后的锁定截止时刻,期间不再自动滑
+    private var ruleCacheText: String? = null    // 高级规则文本缓存
+    private var ruleCache: CompiledRule? = null
+    private var lastRuleErrorAt = 0L
 
     // 定时主动扫描:红果广告可能是静态 SurfaceView(不产生无障碍事件),
     // 只靠事件驱动会漏扫 → 必须定时轮询。间隔由设置决定(默认 1 秒)。
@@ -191,21 +198,42 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val keywords = AppSettings.keywords(this)
         val label = keywords.joinToString("/")
         val scan = AdDetector.scan(root, keywords)
-        val state = AdRule.classify(scan, AppSettings.strictMode(this))
+        // 记录最近一次看到的集数,作为"上滑是否换集"的基准
+        AdDetector.episodeNumber(scan.episodeHeader)?.let { lastKnownEpisode = it }
+        val strict = AppSettings.strictMode(this)
+        val advanced = AppSettings.advancedRulesEnabled(this)
+        val builtinState = AdRule.classify(scan, strict)
+        val decision = 判定动作(scan, strict, advanced)
 
         val canSwipeAd = now >= readyAt && now >= quietUntil
                 && now - lastSwipeAt >= SWIPE_COOLDOWN_MS && now - lastUserScrollAt >= USER_SCROLL_GUARD_MS
 
-        when (state) {
-            PageState.AD -> {
+        when (decision) {
+            RuleDecision.SWIPE -> {
+                // 上一次自动上滑把集数滑变了:锁定一段时间,绝不再补滑,
+                // 否则会一路从第2集滑到第3、4集
+                if (now < overshootLockUntil) {
+                    if (now - lastStuckLogAt >= AD_STUCK_LOG_MS) {
+                        lastStuckLogAt = now
+                        LogBuf.add("误滑换集锁定中,暂停自动上滑(剩余 ${(overshootLockUntil - now) / 1000}s)")
+                    }
+                    return
+                }
                 lastAdClearAt = 0L // 判定成立,清零防抖计时
                 // 只响应"新出现"的判定:上升沿在手势送达成功时消耗。
                 if (!prevAdContext) {
+                    // 关键词不在树里、但顶部有「第X集」时,说明广告把整棵树替换了
+                    val reason = when {
+                        scan.keywordPresent -> "找不到可见的「$label」"
+                        scan.episodeHeader != null -> "顶部有「${scan.episodeHeader}」但找不到可见的「$label」"
+                        advanced -> "高级规则判定上滑"
+                        else -> "找不到可见的「$label」"
+                    }
                     if (!canSwipeAd) {
-                        LogBuf.add("找不到可见的「$label」,但当前处于冷却/守卫期,暂不动作")
+                        LogBuf.add("$reason,但当前处于冷却/守卫期,暂不动作")
                     } else {
-                        LogBuf.add("找不到可见的「$label」($pkg): 上滑| 文字数=${scan.textCount}")
-                        swipeUpOnce("找不到可见的「$label」,自动上滑")
+                        LogBuf.add("$reason($pkg): 上滑| 文字数=${scan.textCount}")
+                        swipeUpOnce("$reason,自动上滑", lastKnownEpisode)
                     }
                 } else if (now - lastStuckLogAt >= AD_STUCK_LOG_MS) {
                     lastStuckLogAt = now
@@ -213,7 +241,9 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 }
             }
 
-            PageState.NORMAL, PageState.UNKNOWN -> {
+            RuleDecision.IGNORE -> {
+                // 「选集」重新可见,说明已经稳定在新页面,解除误滑锁
+                if (scan.keywordVisible) overshootLockUntil = 0L
                 // 防抖动:判定需持续消失 ≥1 秒才算真结束
                 if (lastAdClearAt == 0L) lastAdClearAt = now
                 if (now - lastAdClearAt >= AD_DEBOUNCE_MS) {
@@ -221,8 +251,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
                     swipeAttempts = 0
                     missSamples = 0
                 }
-                // 严格模式下频繁回到首页时,30 秒提示一次"为何不动手",便于排查
-                if (state == PageState.UNKNOWN && now - lastUnknownLogAt >= 30_000L) {
+                // 内置严格模式频繁回到首页时,30 秒提示一次"为何不动手",便于排查
+                if (!advanced && builtinState == PageState.UNKNOWN && now - lastUnknownLogAt >= 30_000L) {
                     lastUnknownLogAt = now
                     LogBuf.add("当前页面没有「$label」节点,严格模式下不上滑(可在主界面关闭严格模式)")
                 }
@@ -231,10 +261,49 @@ class AdSkipAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * 当前扫描该不该上滑:优先使用用户写的高级规则,否则用内置的严格/宽松判定。
+     * 高级规则解析失败时回退内置判定,并做 30 秒日志节流。
+     */
+    private fun 判定动作(scan: AdScan, strict: Boolean, advanced: Boolean): RuleDecision {
+        fun builtin(): RuleDecision =
+            if (AdRule.classify(scan, strict) == PageState.AD) RuleDecision.SWIPE else RuleDecision.IGNORE
+
+        if (!advanced) return builtin()
+
+        val text = AppSettings.advancedRules(this)
+        if (text != ruleCacheText) {
+            ruleCacheText = text
+            ruleCache = try {
+                RuleEngine.compile(text)
+            } catch (e: RuleParseException) {
+                val now = System.currentTimeMillis()
+                if (now - lastRuleErrorAt > 30_000L) {
+                    lastRuleErrorAt = now
+                    LogBuf.add("高级规则解析失败,已回退内置规则: ${e.message}")
+                }
+                null
+            }
+        }
+        val rule = ruleCache ?: return builtin()
+        return rule.decide(
+            RuleContext(
+                keywordVisible = scan.keywordVisible,
+                keywordPresent = scan.keywordPresent,
+                episode = AdDetector.episodeNumber(scan.episodeHeader),
+                textCount = scan.textCount,
+                strict = strict
+            )
+        )
+    }
+
+    /**
      * 上滑一次并进入安静期。返回是否真的滑了 ——
      * 被冷却/安静期挡下时返回 false,调用方要负责续上重试链。
+     *
+     * @param episode 发起手势时所在的集数,用于事后判断是否把集数滑变了;
+     *                手动触发传 null 表示不做换集判定。
      */
-    private fun swipeUpOnce(reason: String): Boolean {
+    private fun swipeUpOnce(reason: String, episode: Int? = lastKnownEpisode): Boolean {
         val now = System.currentTimeMillis()
         if (now < quietUntil) return false
         if (now - lastSwipeAt < SWIPE_COOLDOWN_MS) return false
@@ -248,6 +317,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
             missSamples = 0
             prevAdContext = true
             resumeScanAt = now + POST_SWIPE_PAUSE_MS
+            swipeEpisode = episode
+            swipeAt = now
             AppSettings.recordSwipe(this)
         }
         LogBuf.add(
@@ -283,6 +354,25 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val keywords = AppSettings.keywords(this)
         val label = keywords.joinToString("/")
         val scan = AdDetector.scan(root, keywords)
+        val currentEpisode = AdDetector.episodeNumber(scan.episodeHeader)
+        if (currentEpisode != null) lastKnownEpisode = currentEpisode
+
+        // 误滑换集检测:手势前记下的集数,手势后变了 → 这一滑跨集了。
+        // 期间有用户手动翻页时不归因于自动上滑。
+        val fromEpisode = swipeEpisode
+        if (fromEpisode != null && currentEpisode != null &&
+            currentEpisode != fromEpisode && lastUserScrollAt <= swipeAt
+        ) {
+            LogBuf.add("检测到集数从第 ${fromEpisode} 集变成第 $currentEpisode 集,判定为误滑,停止本轮重试")
+            AdHintOverlay.show(this, "误滑到第${currentEpisode}集,已停止")
+            overshootLockUntil = System.currentTimeMillis() + 20_000L
+            swipeAttempts = 0
+            missSamples = 0
+            prevAdContext = false
+            swipeEpisode = null
+            return
+        }
+
         if (scan.keywordVisible) {
             AppSettings.recordSkip(this)
             LogBuf.add("已确认:「$label」回来了,上滑成功 ✓(本轮共滑 $swipeAttempts 次,${AppSettings.statsText(this)})")
@@ -290,10 +380,14 @@ class AdSkipAccessibilityService : AccessibilityService() {
             missSamples = 0
             return
         }
-        // 严格模式下如果连关键词节点都不存在了,说明已经离开播放页(或树被整体替换),
-        // 继续重试就会在首页/其他页面上误滑,直接终止本轮
-        if (AdRule.classify(scan, AppSettings.strictMode(this)) == PageState.UNKNOWN) {
-            LogBuf.add("已离开播放页特征,停止重试(本轮已滑 $swipeAttempts 次)")
+        // 当前规则已经不需要动作(离开播放页/自定义规则判定为不动)→ 终止本轮重试
+        if (判定动作(
+                scan,
+                AppSettings.strictMode(this),
+                AppSettings.advancedRulesEnabled(this)
+            ) == RuleDecision.IGNORE
+        ) {
+            LogBuf.add("当前规则判定不动作,停止重试(本轮已滑 $swipeAttempts 次)")
             swipeAttempts = 0
             missSamples = 0
             prevAdContext = false
@@ -310,7 +404,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
             return
         }
         LogBuf.add("上滑后仍看不到「$label」(已复核 $REQUIRED_MISS_SAMPLES 次)→ 第 $swipeAttempts 次重试")
-        if (!swipeUpOnce("第 $swipeAttempts 次重试")) {
+        if (!swipeUpOnce("第 $swipeAttempts 次重试", swipeEpisode ?: lastKnownEpisode)) {
             handler.postDelayed(Runnable { checkSwipeResult() }, 1000L)
         }
     }
@@ -331,7 +425,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
             resumeScanAt = 0L
             swipeAttempts = 0
             missSamples = 0
-            swipeUpOnce("手动触发")
+            swipeUpOnce("手动触发", null)
         }
     }
 

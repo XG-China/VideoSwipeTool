@@ -16,19 +16,21 @@ enum class PageState {
  * 纯判定逻辑,与 Android API 解耦,便于单元测试。
  *
  * 严格模式(默认):
- *   - 关键词可见            → NORMAL
- *   - 关键词存在但不可见    → AD(播放页被广告盖住,这是唯一会触发的状态)
- *   - 关键词完全不存在      → UNKNOWN(首页/搜索页/榜单页,不滑)
+ *   - 关键词可见                          → NORMAL
+ *   - 关键词存在但不可见                  → AD(播放页被广告盖住)
+ *   - 关键词完全不存在,但顶部有「第X集」  → AD(整棵树被广告替换,靠集数标题认播放页)
+ *   - 以上都没有                          → UNKNOWN(首页/搜索页/榜单页,不滑)
  *
  * 宽松模式(旧行为):
- *   - 关键词可见            → NORMAL
- *   - 其余                  → AD
+ *   - 关键词可见                          → NORMAL
+ *   - 其余                                → AD
  */
 object AdRule {
     fun classify(scan: AdScan, strict: Boolean): PageState = when {
         scan.keywordVisible -> PageState.NORMAL
         scan.keywordPresent -> PageState.AD
-        strict -> PageState.UNKNOWN
-        else -> PageState.AD
+        !strict -> PageState.AD
+        scan.episodeHeader != null -> PageState.AD
+        else -> PageState.UNKNOWN
     }
 }

@@ -5,8 +5,13 @@ import org.junit.Test
 
 class AdRuleTest {
 
-    private fun scan(visible: Boolean, present: Boolean) =
-        AdScan(keywordVisible = visible, keywordPresent = present, textCount = 10)
+    private fun scan(visible: Boolean, present: Boolean, episodeHeader: String? = null) =
+        AdScan(
+            keywordVisible = visible,
+            keywordPresent = present,
+            textCount = 10,
+            episodeHeader = episodeHeader
+        )
 
     @Test
     fun `关键词可见时是正常页面`() {
@@ -22,6 +27,28 @@ class AdRuleTest {
     @Test
     fun `严格模式下首页这类没有关键词的页面不动作`() {
         assertEquals(PageState.UNKNOWN, AdRule.classify(scan(visible = false, present = false), strict = true))
+    }
+
+    @Test
+    fun `顶部有第X集时即使关键词节点消失也判为广告`() {
+        assertEquals(
+            PageState.AD,
+            AdRule.classify(
+                scan(visible = false, present = false, episodeHeader = "第3集"),
+                strict = true
+            )
+        )
+    }
+
+    @Test
+    fun `关键词可见时顶部集数标题不应触发`() {
+        assertEquals(
+            PageState.NORMAL,
+            AdRule.classify(
+                scan(visible = true, present = true, episodeHeader = "第999集"),
+                strict = true
+            )
+        )
     }
 
     @Test

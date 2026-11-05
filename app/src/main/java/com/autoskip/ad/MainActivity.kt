@@ -342,6 +342,35 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
     var keywords by remember { mutableStateOf(AppSettings.keywords(ctx).joinToString("、")) }
     var intervalMs by remember { mutableStateOf(AppSettings.scanIntervalMs(ctx).toInt()) }
     var savedHint by remember { mutableStateOf("") }
+    var advanced by remember { mutableStateOf(AppSettings.advancedRulesEnabled(ctx)) }
+    var ruleText by remember { mutableStateOf(AppSettings.advancedRules(ctx)) }
+    var ruleError by remember { mutableStateOf("") }
+
+    fun saveAll() {
+        if (advanced) {
+            try {
+                RuleEngine.compile(ruleText)
+            } catch (e: RuleParseException) {
+                ruleError = e.message ?: "规则格式错误"
+                return
+            }
+            AppSettings.setAdvancedRules(ctx, ruleText)
+            ruleError = ""
+        }
+        AppSettings.setKeywords(ctx, keywords)
+        AppSettings.setScanIntervalMs(ctx, intervalMs.toLong())
+        keywords = AppSettings.keywords(ctx).joinToString("、")
+        intervalMs = AppSettings.scanIntervalMs(ctx).toInt()
+        savedHint = when {
+            advanced -> "已保存(高级规则)"
+            AppSettings.strictMode(ctx) -> "已保存(严格判定)"
+            else -> "已保存(宽松判定)"
+        }
+        LogBuf.add(
+            "规则已更新:关键词=${AppSettings.keywords(ctx).joinToString("/")}, " +
+                "间隔=${intervalMs}ms, 高级=${advanced}, 严格=${AppSettings.strictMode(ctx)}"
+        )
+    }
 
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -364,6 +393,67 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
                         LogBuf.add("严格判定已${if (it) "开启" else "关闭"}")
                     }
                 )
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("高级规则(如果 / 如果真)", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "用条件判断替代固定规则;关闭时使用上面的严格/宽松判定",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = advanced,
+                    onCheckedChange = {
+                        advanced = it
+                        AppSettings.setAdvancedRulesEnabled(ctx, it)
+                        ruleError = ""
+                        LogBuf.add("高级规则已${if (it) "开启" else "关闭"}")
+                    }
+                )
+            }
+
+            if (advanced) {
+                Text(
+                    "语法:如果 / 否则如果 / 否则 / 结束如果,动作:上滑 / 不动作。\n" +
+                        "条件:可见关键词、存在关键词、有集数、集数 >= N、文字数 >= N、严格模式,支持 且/或/非 和括号。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = ruleText,
+                    onValueChange = {
+                        ruleText = it
+                        ruleError = ""
+                        savedHint = ""
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    minLines = 8,
+                    maxLines = 16
+                )
+                if (ruleError.isNotEmpty()) {
+                    Text(
+                        ruleError,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = WarnRed
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = {
+                        ruleText = AppSettings.DEFAULT_RULE_TEXT
+                        AppSettings.setAdvancedRules(ctx, ruleText)
+                        ruleError = ""
+                        savedHint = "已恢复默认高级规则"
+                        LogBuf.add("高级规则已恢复默认")
+                    }) { Text("恢复默认") }
+                    TextButton(onClick = {
+                        // 高级规则编辑时,保存按钮统一走 saveAll()
+                        saveAll()
+                    }) { Text("保存高级规则") }
+                }
             }
 
             OutlinedTextField(
@@ -390,14 +480,7 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
             )
 
             Button(
-                onClick = {
-                    AppSettings.setKeywords(ctx, keywords)
-                    AppSettings.setScanIntervalMs(ctx, intervalMs.toLong())
-                    keywords = AppSettings.keywords(ctx).joinToString("、")
-                    intervalMs = AppSettings.scanIntervalMs(ctx).toInt()
-                    savedHint = if (AppSettings.strictMode(ctx)) "已保存(严格判定)" else "已保存(宽松判定)"
-                    LogBuf.add("规则已更新:关键词=${AppSettings.keywords(ctx).joinToString("/")}, 间隔=${intervalMs}ms, 严格=${AppSettings.strictMode(ctx)}")
-                },
+                onClick = { saveAll() },
                 modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = BrandRed)
             ) {
