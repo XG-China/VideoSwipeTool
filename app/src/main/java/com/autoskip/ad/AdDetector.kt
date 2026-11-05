@@ -6,43 +6,62 @@ import android.view.accessibility.AccessibilityNodeInfo
 /**
  * 一次屏幕扫描的结果。
  *
- * @param keywordVisible 是否至少有一个可见节点命中关键词(剧集页正常情况下应为 true)
- * @param keywordPresent 是否至少有一个节点命中关键词,不管可见性
- *                       (广告覆盖时节点仍在树里但不可见,这是播放页的关键特征)
- * @param textCount      全树去重文字总数
- * @param episodeHeader  顶部左侧识别到的「第X集」标题(X=1..999),没有则为 null
+ * @param keywordVisible    所有配置的关键词是否都可见(严格判定用)
+ * @param anyKeywordVisible 是否至少有一个关键词可见(宽松判定用)
+ * @param keywordPresent    是否至少有一个关键词存在于 UI 树(不看可见性,日志用)
+ * @param textCount         全树去重文字总数
+ * @param episodeHeader     顶部左侧识别到的「第X集」标题,没有则为 null
  */
 data class AdScan(
     val keywordVisible: Boolean,
+    val anyKeywordVisible: Boolean,
     val keywordPresent: Boolean,
     val textCount: Int,
-    val episodeHeader: String? = null
+    val episodeHeader: String? = null,
+    val countdownSeconds: Int? = null
 )
 
 /**
  * 扫描规则:
  *
- *   播放页特征成立(关键词节点存在,或顶部有「第X集」),但关键词不可见 → 广告覆盖,上滑。
+ *   严格判定:屏幕上同时有「选集」和「第N集」才不滑;缺任意一个就上滑。
+ *   宽松判定:只要有一个关键词可见就不滑。
  *
- * 只认 **isVisibleToUser = true** 的节点来判断"可见";同时统计**不看可见性**的
- * 关键词节点数,用来区分"播放页被盖住"和"根本不是播放页"。
- *
+ * 「第N集」里的 N 是通配符,匹配第1集、第16集、第1000集等任意数字。
  * 纯本地 UI 树解析,不联网、不 OCR、不点按钮。
  */
 object AdDetector {
 
     private const val MAX_NODES = 2000
 
-    /** 顶部集数标题:第1集 ~ 第999集(不接受 0、4 位以上数字)。 */
-    private val EPISODE_HEADER = Regex("""第([1-9]\d{0,2})集""")
+    /** 集数标题:第1集、第16集、第1000集……(N 为任意数字)。 */
+    private val EPISODE_HEADER = Regex("""第(\d+)集""")
+
+    /**
+     * 广告倒计时:5s / 5S / 5秒 / 广告 5 / 剩余 5 秒。
+     * 用负向前瞻/后顾排除 1.5s 里的 "5s"、分辨率、剧集数字等。
+     */
+    private val COUNTDOWN_PATTERNS = listOf(
+        Regex("""(?<![\d.])(\d{1,3})\s*[sS](?![a-zA-Z])"""),
+        Regex("""(?<![\d.])(\d{1,3})\s*秒"""),
+        Regex("""广告\s*(\d{1,3})""")
+    )
+
+    /** 关键词里的集数通配符写法:第N集 / 第n集 / 第*集。 */
+    fun isEpisodePatternKeyword(keyword: String): Boolean {
+        val k = keyword.trim()
+        return k == "第N集" || k == "第n集" || k == "第*集"
+    }
 
     fun scan(
         root: AccessibilityNodeInfo,
         keywords: List<String> = AppSettings.DEFAULT_KEYWORDS
     ): AdScan {
-        var keywordVisible = false
-        var keywordPresent = false
+        val required = keywords.filter { it.isNotBlank() }.ifEmpty { AppSettings.DEFAULT_KEYWORDS }
+        val visible = HashSet<String>()
+        val present = HashSet<String>()
         var episodeHeader: String? = null
+        var countdownSeconds: Int? = null
         val allTexts = LinkedHashSet<String>()
         var visited = 0
 
@@ -63,13 +82,10 @@ object AdDetector {
 
             if (full.isNotEmpty()) {
                 allTexts += full
-                if (!keywordPresent || !keywordVisible) {
-                    val hit = matchesAny(full, keywords)
-                    if (hit) {
-                        // 不看可见性:只要树里有,就说明当前页面具备播放页特征
-                        keywordPresent = true
-                        if (node.isVisibleToUser) keywordVisible = true
-                    }
+                for (kw in required) {
+                    if (!matchesKeyword(full, kw)) continue
+                    present += kw
+                    if (node.isVisibleToUser) visible += kw
                 }
                 // 「第X集」只在屏幕左上角生效,避免把列表/推荐卡片里的集数当成播放页标题
                 if (episodeHeader == null && node.isVisibleToUser && full.contains('第')) {
@@ -81,6 +97,10 @@ object AdDetector {
                         if (inTopLeft) episodeHeader = match
                     }
                 }
+                // 广告倒计时通常是很短的文本节点(5s / 5秒 / 广告 5)
+                if (countdownSeconds == null && node.isVisibleToUser && full.length <= 24) {
+                    countdownSeconds = findCountdown(full)
+                }
             }
 
             for (i in 0 until node.childCount) {
@@ -89,21 +109,40 @@ object AdDetector {
         }
 
         return AdScan(
-            keywordVisible = keywordVisible,
-            keywordPresent = keywordPresent,
+            keywordVisible = visible.size >= required.size,
+            anyKeywordVisible = visible.isNotEmpty(),
+            keywordPresent = present.isNotEmpty(),
             textCount = allTexts.size,
-            episodeHeader = episodeHeader
+            episodeHeader = episodeHeader,
+            countdownSeconds = countdownSeconds
         )
     }
 
-    /** 文本是否命中任一关键词(忽略大小写)。纯函数,便于单元测试。 */
+    /** 文本是否命中任一关键词;支持「第N集」通配符。纯函数,便于单元测试。 */
     fun matchesAny(text: String, keywords: List<String>): Boolean =
-        keywords.any { it.isNotBlank() && text.contains(it, ignoreCase = true) }
+        keywords.any { matchesKeyword(text, it) }
 
-    /** 从文本中提取「第X集」(X=1..999);没有则返回 null。纯函数,便于单元测试。 */
+    /** 单个关键词匹配:普通词按字面量,「第N集」按任意数字。 */
+    fun matchesKeyword(text: String, keyword: String): Boolean {
+        if (keyword.isBlank()) return false
+        if (isEpisodePatternKeyword(keyword)) return EPISODE_HEADER.containsMatchIn(text)
+        return text.contains(keyword, ignoreCase = true)
+    }
+
+    /** 从文本中提取「第X集」;X 为任意数字。没有则返回 null。 */
     fun findEpisodeHeader(text: String): String? = EPISODE_HEADER.find(text)?.value
 
     /** 把「第3集」解析成 3;不是合法集数则返回 null。 */
     fun episodeNumber(header: String?): Int? =
         header?.let { EPISODE_HEADER.find(it)?.groupValues?.getOrNull(1)?.toIntOrNull() }
+
+    /** 从文本中识别广告倒计时秒数(0..120);不是倒计时返回 null。纯函数,便于单元测试。 */
+    fun findCountdown(text: String): Int? {
+        for (pattern in COUNTDOWN_PATTERNS) {
+            val match = pattern.find(text) ?: continue
+            val seconds = match.groupValues.getOrNull(1)?.toIntOrNull() ?: continue
+            if (seconds in 0..120) return seconds
+        }
+        return null
+    }
 }

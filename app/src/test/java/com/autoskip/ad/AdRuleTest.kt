@@ -5,54 +5,55 @@ import org.junit.Test
 
 class AdRuleTest {
 
-    private fun scan(visible: Boolean, present: Boolean, episodeHeader: String? = null) =
-        AdScan(
-            keywordVisible = visible,
-            keywordPresent = present,
-            textCount = 10,
-            episodeHeader = episodeHeader
-        )
+    private fun scan(
+        allVisible: Boolean,
+        anyVisible: Boolean = allVisible,
+        present: Boolean = allVisible,
+        episodeHeader: String? = null
+    ) = AdScan(
+        keywordVisible = allVisible,
+        anyKeywordVisible = anyVisible,
+        keywordPresent = present,
+        textCount = 10,
+        episodeHeader = episodeHeader
+    )
 
     @Test
-    fun `关键词可见时是正常页面`() {
-        assertEquals(PageState.NORMAL, AdRule.classify(scan(visible = true, present = true), strict = true))
-        assertEquals(PageState.NORMAL, AdRule.classify(scan(visible = true, present = true), strict = false))
+    fun `严格模式下两个关键词都可见才不滑`() {
+        assertEquals(PageState.NORMAL, AdRule.classify(scan(allVisible = true), strict = true))
     }
 
     @Test
-    fun `严格模式下关键词存在但不可见才是广告`() {
-        assertEquals(PageState.AD, AdRule.classify(scan(visible = false, present = true), strict = true))
+    fun `严格模式下缺任意一个关键词就上滑`() {
+        assertEquals(PageState.AD, AdRule.classify(scan(allVisible = false, anyVisible = true), strict = true))
+        assertEquals(PageState.AD, AdRule.classify(scan(allVisible = false, anyVisible = false), strict = true))
     }
 
     @Test
-    fun `严格模式下首页这类没有关键词的页面不动作`() {
-        assertEquals(PageState.UNKNOWN, AdRule.classify(scan(visible = false, present = false), strict = true))
-    }
-
-    @Test
-    fun `顶部有第X集时即使关键词节点消失也判为广告`() {
-        assertEquals(
-            PageState.AD,
-            AdRule.classify(
-                scan(visible = false, present = false, episodeHeader = "第3集"),
-                strict = true
-            )
-        )
-    }
-
-    @Test
-    fun `关键词可见时顶部集数标题不应触发`() {
+    fun `宽松模式下任意一个关键词可见就不滑`() {
         assertEquals(
             PageState.NORMAL,
-            AdRule.classify(
-                scan(visible = true, present = true, episodeHeader = "第999集"),
-                strict = true
-            )
+            AdRule.classify(scan(allVisible = false, anyVisible = true), strict = false)
         )
     }
 
     @Test
-    fun `宽松模式保持旧的找不到就滑行为`() {
-        assertEquals(PageState.AD, AdRule.classify(scan(visible = false, present = false), strict = false))
+    fun `宽松模式下一个关键词都看不到就上滑`() {
+        assertEquals(
+            PageState.AD,
+            AdRule.classify(scan(allVisible = false, anyVisible = false), strict = false)
+        )
+    }
+
+    @Test
+    fun `顶部第X集不影响双关键词判定`() {
+        assertEquals(
+            PageState.AD,
+            AdRule.classify(scan(allVisible = false, episodeHeader = "第3集"), strict = true)
+        )
+        assertEquals(
+            PageState.NORMAL,
+            AdRule.classify(scan(allVisible = true, episodeHeader = "第999集"), strict = true)
+        )
     }
 }

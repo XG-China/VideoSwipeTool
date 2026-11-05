@@ -33,6 +33,17 @@ object GestureKit {
         return dispatch(svc, path, durationMs)
     }
 
+    /** 从屏幕中上方向下快速下滑(0.20h → 0.85h,200ms),用于误滑后回退一集。 */
+    fun swipeDown(svc: AccessibilityService, durationMs: Long = 200): Boolean {
+        val w = svc.resources.displayMetrics.widthPixels.toFloat()
+        val h = svc.resources.displayMetrics.heightPixels.toFloat()
+        val path = Path().apply {
+            moveTo(w / 2f, h * 0.20f)
+            lineTo(w / 2f, h * 0.85f)
+        }
+        return dispatch(svc, path, durationMs)
+    }
+
     /**
      * 下达手势。true = 系统已接收并执行;false = 没能送达(队列占用/服务异常)。
      * **不含**「App 是否响应」的语义,那只能事后看屏幕。

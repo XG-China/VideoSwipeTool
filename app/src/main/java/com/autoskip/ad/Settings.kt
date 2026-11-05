@@ -66,7 +66,12 @@ object AppSettings {
     fun setMasterEnabled(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("master_enabled", v).apply()
 
     // ---------- 判定关键词 ----------
-    val DEFAULT_KEYWORDS = listOf("选集")
+    /**
+     * 默认包含两个关键词:
+     *  - 「选集」:用于判断剧集页是否被广告盖住
+     *  - 「第N集」:N 是通配符,匹配任意集数标题(第1集、第16集……),用于集数定位与误滑回退
+     */
+    val DEFAULT_KEYWORDS = listOf("选集", "第N集")
 
     /**
      * 把用户输入的原始文本解析成关键词列表。
@@ -83,8 +88,15 @@ object AppSettings {
             .ifEmpty { DEFAULT_KEYWORDS }
     }
 
-    fun keywords(ctx: Context): List<String> =
-        parseKeywords(sp(ctx).getString("keywords", null))
+    fun keywords(ctx: Context): List<String> {
+        val parsed = parseKeywords(sp(ctx).getString("keywords", null))
+        // 新规则要求「选集 + 第N集」同时存在;旧版本只存了「选集」时自动补上
+        return if (parsed.any { AdDetector.isEpisodePatternKeyword(it) }) {
+            parsed
+        } else {
+            parsed + "第N集"
+        }
+    }
 
     fun setKeywords(ctx: Context, raw: String) {
         sp(ctx).edit().putString("keywords", parseKeywords(raw).joinToString(",")).apply()
@@ -111,33 +123,16 @@ object AppSettings {
     fun strictMode(ctx: Context): Boolean = sp(ctx).getBoolean("strict_mode", true)
     fun setStrictMode(ctx: Context, v: Boolean) = sp(ctx).edit().putBoolean("strict_mode", v).apply()
 
-    // ---------- 高级规则(类易语言 如果/如果真) ----------
-    val DEFAULT_RULE_TEXT = """
-        # 默认规则:等价于严格判定
-        # 信号:可见关键词、存在关键词、有集数、集数、文字数、严格模式/宽松模式
-        # 动作:上滑、不动作
-        如果 可见关键词
-            不动作
-        否则如果 存在关键词
-            上滑
-        否则如果 有集数
-            上滑
-        否则
-            不动作
-        结束如果
-    """.trimIndent()
+    // ---------- 误滑换集自动回退 ----------
+    /**
+     * 开启后:自动上滑把集数从第 N 集跳到第 N+2 集或更远时,
+     * 目标设为第 N+1 集,连续下滑回退(最多 3 次)。
+     */
+    fun autoCorrectEpisode(ctx: Context): Boolean =
+        sp(ctx).getBoolean("auto_correct_episode", true)
 
-    fun advancedRulesEnabled(ctx: Context): Boolean =
-        sp(ctx).getBoolean("advanced_rules_enabled", false)
-
-    fun setAdvancedRulesEnabled(ctx: Context, v: Boolean) =
-        sp(ctx).edit().putBoolean("advanced_rules_enabled", v).apply()
-
-    fun advancedRules(ctx: Context): String =
-        sp(ctx).getString("advanced_rules", null) ?: DEFAULT_RULE_TEXT
-
-    fun setAdvancedRules(ctx: Context, text: String) =
-        sp(ctx).edit().putString("advanced_rules", text).apply()
+    fun setAutoCorrectEpisode(ctx: Context, v: Boolean) =
+        sp(ctx).edit().putBoolean("auto_correct_episode", v).apply()
 
     // ---------- 累计统计 ----------
     fun totalSwipes(ctx: Context): Int = sp(ctx).getInt("stat_swipes", 0)
@@ -155,7 +150,7 @@ object AppSettings {
         sp(ctx).edit().putInt("stat_swipes", 0).putInt("stat_skips", 0).apply()
     }
 
-    /** 统计文案,主界面和日志共用。 */
+    /** 统计文案,主界面和日志共用。只统计自动上滑/自动跳过。 */
     fun statsText(ctx: Context): String =
-        "累计跳过 ${totalSkips(ctx)} 次 / 上滑 ${totalSwipes(ctx)} 次"
+        "自动跳过 ${totalSkips(ctx)} 次 / 自动上滑 ${totalSwipes(ctx)} 次"
 }

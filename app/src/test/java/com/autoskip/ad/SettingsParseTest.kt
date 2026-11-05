@@ -10,9 +10,9 @@ class SettingsParseTest {
 
     @Test
     fun `空输入回退默认关键词`() {
-        assertEquals(listOf("选集"), AppSettings.parseKeywords(null))
-        assertEquals(listOf("选集"), AppSettings.parseKeywords("   "))
-        assertEquals(listOf("选集"), AppSettings.parseKeywords("，，、;"))
+        assertEquals(listOf("选集", "第N集"), AppSettings.parseKeywords(null))
+        assertEquals(listOf("选集", "第N集"), AppSettings.parseKeywords("   "))
+        assertEquals(listOf("选集", "第N集"), AppSettings.parseKeywords("，，、;"))
     }
 
     @Test
@@ -31,18 +31,27 @@ class SettingsParseTest {
     }
 
     @Test
+    fun `第N集中的N匹配任意数字`() {
+        assertTrue(AdDetector.matchesAny("第1集", listOf("第N集")))
+        assertTrue(AdDetector.matchesAny("第16集 全网...", listOf("第N集")))
+        assertTrue(AdDetector.matchesAny("第1000集", listOf("第N集")))
+        assertFalse(AdDetector.matchesAny("选集", listOf("第N集")))
+        assertFalse(AdDetector.matchesAny("第N集", listOf("第N集")))
+    }
+
+    @Test
     fun `空白关键词不参与匹配`() {
         assertFalse(AdDetector.matchesAny("随便什么文字", listOf("", "  ")))
     }
 
     @Test
-    fun `集数标题只接受1到999`() {
+    fun `集数标题接受任意数字`() {
         assertEquals("第1集", AdDetector.findEpisodeHeader("第1集"))
         assertEquals("第999集", AdDetector.findEpisodeHeader("第999集"))
         assertEquals("第3集", AdDetector.findEpisodeHeader("第3集 全网..."))
-        assertNull(AdDetector.findEpisodeHeader("第0集"))
-        assertNull(AdDetector.findEpisodeHeader("第1000集"))
-        assertNull(AdDetector.findEpisodeHeader("第03集"))
+        assertEquals("第0集", AdDetector.findEpisodeHeader("第0集"))
+        assertEquals("第1000集", AdDetector.findEpisodeHeader("第1000集"))
+        assertEquals("第03集", AdDetector.findEpisodeHeader("第03集"))
         assertNull(AdDetector.findEpisodeHeader("没有集数"))
     }
 
@@ -51,7 +60,20 @@ class SettingsParseTest {
         assertEquals(1, AdDetector.episodeNumber("第1集"))
         assertEquals(2, AdDetector.episodeNumber("第2集"))
         assertEquals(999, AdDetector.episodeNumber("第999集"))
-        assertNull(AdDetector.episodeNumber("第0集"))
+        assertEquals(1000, AdDetector.episodeNumber("第1000集"))
         assertNull(AdDetector.episodeNumber(null))
+    }
+
+    @Test
+    fun `识别广告倒计时`() {
+        assertEquals(5, AdDetector.findCountdown("5s"))
+        assertEquals(5, AdDetector.findCountdown("5秒"))
+        assertEquals(5, AdDetector.findCountdown("广告 5"))
+        assertEquals(15, AdDetector.findCountdown("广告15秒后可跳过"))
+        assertNull(AdDetector.findCountdown("1.0x"))
+        assertNull(AdDetector.findCountdown("23.01"))
+        assertNull(AdDetector.findCountdown("第5集"))
+        assertNull(AdDetector.findCountdown("全129集"))
+        assertNull(AdDetector.findCountdown("155s"))
     }
 }
