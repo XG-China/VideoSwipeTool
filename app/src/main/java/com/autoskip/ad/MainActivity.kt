@@ -376,6 +376,11 @@ private fun UsageCard(onOpenApp: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Text(
+                "无网络权限,所有判断都在本地完成。",
+                style = MaterialTheme.typography.bodySmall,
+                color = OkGreen
+            )
             OutlinedButton(onClick = onOpenApp, modifier = Modifier.fillMaxWidth()) {
                 Text("打开目标应用")
             }
