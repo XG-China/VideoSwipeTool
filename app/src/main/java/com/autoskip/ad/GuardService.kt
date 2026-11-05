@@ -65,7 +65,7 @@ class GuardService : Service() {
             return Notification.Builder(ctx, CHANNEL_ID)
                 .setContentTitle(if (master) "自动广告跳过运行中" else "自动广告跳过已暂停")
                 .setContentText(
-                    if (master) "红果免费短剧广告将自动上滑跳过 · ${AppSettings.statsText(ctx)}"
+                    if (master) "目标视频应用广告将自动上滑跳过 · ${AppSettings.statsText(ctx)}"
                     else "总开关已关闭,点击「开启」恢复自动上滑"
                 )
                 .setSmallIcon(R.drawable.ic_stat_skip)

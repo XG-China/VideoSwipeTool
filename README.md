@@ -1,27 +1,35 @@
-# 红果免费短剧广告自动跳过
+# 通用视频上滑工具 (VideoSwipeTool)
 
-开车、骑车刷红果短剧时,不用再手动划走广告。
+开车、骑车刷视频时,不用再手动划走广告。
 
-屏幕上同时有「选集」和「第N集」就不动;缺任意一个就自动上滑。
+用三组关键词判断当前页面:
+
+- 剧集页(选集 / 第N集)和首页(关注 / 推荐 / 首页)不滑
+- 广告页(返回 / 上滑继续看短剧 / 点击进入直播间)上滑
+- 什么都没命中,也按广告页上滑
+
+默认不开启任何 App;在主界面或悬浮面板里勾选需要自动上滑的视频应用。
 广告有倒计时会等结束;上滑后如果多跳了一集,会自动滑回来。
 
 ## 下载
 
-- [正式版](https://github.com/XG-China/HongGuoAdSkipper/releases/latest):新安装 / 分享给别人
-- [自用升级版](https://github.com/XG-China/HongGuoAdSkipper/releases/latest):覆盖旧版安装,保留设置和统计
+- [正式版](https://github.com/XG-China/VideoSwipeTool/releases/latest):新安装 / 分享给别人
+- [自用升级版](https://github.com/XG-China/VideoSwipeTool/releases/latest):覆盖旧版安装,保留设置和统计
 
 ## 怎么用
 
 1. 安装 APK,打开 App
 2. 开启「无障碍服务」
 3. 允许「显示在其他应用上层」和通知
-4. 打开红果免费短剧
+4. 在主界面的「目标应用」里勾选要自动上滑的 App
+5. 打开该 App 刷视频
 
-> 只对红果免费短剧 `com.phoenix.read` 生效。不联网、不 OCR、不上传任何数据。
+> 只对勾选的目标应用生效。不联网、不 OCR、不上传任何数据。
 
 ## 功能
 
 - 自动上滑跳过广告
+- 三组关键词判断页面,剧集页/首页不误滑
 - 识别 `5s` / `5秒` / `广告 5` 等倒计时,结束再滑
 - 误滑多跳一集时自动回退
 - 悬浮球 + 通知栏快捷开关
@@ -29,22 +37,35 @@
 
 ---
 
-## 判定规则
+## 支持应用
 
-核心在 `AdDetector.kt` + `AdRule.kt`:
+默认一个都不开启。内置常见视频/短剧 App(红果、番茄、抖音、快手、西瓜、B站、腾讯视频、爱奇艺、优酷、芒果TV、小红书、微博等),在主界面「目标应用」或悬浮面板里勾选。
 
-```kotlin
-// 关键词默认: ["选集", "第N集"],N 匹配任意数字
-// 规则只有一条:所有关键词都可见 → 不滑;缺任意一个 → 上滑
-keywordVisible(全部关键词都可见) ? NORMAL : AD
-```
+不同 App 的页面关键词可能不同,可以在「规则设置」里调整三组关键词。
 
-也就是:
+## 页面判定
 
-- 播放页正常时,顶部有「第16集」,底部有「选集」 → 两个都在 → 不动作
-- 广告盖住播放页时,通常「选集」不可见,或者连集数标题一起被盖住 → 缺任意一个 → 上滑
-- 「第N集」只作为关键词/集数信号使用,N 是通配符,不是字面量
-- 关键词可以改成别的,规则仍要求"所有关键词同时可见";只有旧版本默认的单独「选集」会自动补上「第N集」,其他自定义词不会被强行追加
+三组关键词都可以在主界面修改:
+
+| 页面 | 默认关键词 | 动作 |
+|---|---|---|
+| 剧集页 | `选集`、`第N集` | 不滑 |
+| 首页 | `关注`、`推荐`、`首页` | 不滑 |
+| 广告页 | `返回`、`上滑继续看短剧`、`上滑继续观看短剧`、`点击进入直播间` | 上滑 |
+
+优先级:
+
+1. 命中「返回」以外的**广告强关键词** → 广告页,上滑
+2. 命中**剧集页关键词** → 剧集页,不滑
+3. 命中**首页关键词** → 首页,不滑
+4. 只命中 `返回`,或什么都没命中 → 广告页,上滑
+
+几个要点:
+
+- 「返回」是**弱信号**:单独出现时不会覆盖剧集/首页,避免把剧集页左上角的返回按钮误判成广告
+- 命中多个关键词时,按关键词列表顺序取第一个显示,三组都一样
+- 如果广告只剩「返回」,而顶部还能看到「第N集」,会按剧集页处理、不滑;这类广告需要在广告关键词里补一个它独有的词
+- 「第N集」的 N 是通配符,不是字面量
 
 实测(广告正在播,同时刻):
 
@@ -54,11 +75,11 @@ keywordVisible(全部关键词都可见) ? NORMAL : AD
 
 **误滑换集保护**:每次自动上滑前记录当前集数,手势后校验。如果顶部集数从「第2集」变成「第3集」,
 且这几秒内没有用户手动翻页,就判定为误滑 —— 不记成功、立即停止本轮重试、锁定 20 秒
-(关键词重新可见时立即解锁)。第一次误滑仍可能发生(手势已经送出),但不会继续叠加到第 4、5 集。
+(回到剧集页时立即解锁)。第一次误滑仍可能发生(手势已经送出),但不会继续叠加到第 4、5 集。
 
 **不做**倒计时文案猜测、不做「广告」标识判断、不做直播/图片类广告结构识别、不点「跳过」按钮。
 
-> 注意:按这条规则,首页/搜索页如果没有「选集」或「第N集」,也会触发一次上滑。
+> 注意:首页/搜索页如果没命中首页关键词,也会按广告页触发一次上滑。
 > 上升沿逻辑保证同一状态只滑一次,不会在首页连续滑。
 
 **广告倒计时**:如果广告下方出现 `5s` / `5秒` / `广告 5` / `15秒后可跳过` 这类倒计时,
@@ -130,27 +151,27 @@ App 会按显示的秒数等待,倒计时结束后再上滑;同一倒计时文�
 
 ## 界面
 
-单页 Compose,四张卡片,可滚动:
+单页 Compose,五张卡片,可滚动:
 
-1. **状态卡** — 无障碍服务 + 悬浮球两行状态(绿点 = 正常);**只在异常时**才追加一行原因和「去开启」按钮
-2. **用法卡** — 规则一行 + 悬浮球用法一行 + 「打开红果免费短剧」按钮
-3. **规则设置卡** — 判定关键词(N 通配符)、扫描间隔、误滑自动回退开关、保存按钮、自动统计与重置
-4. **日志卡** — 默认折叠只显示最新一条,点标题展开全量,可清空/导出
+1. **状态卡** — 无障碍服务 + 悬浮球 + 目标应用三行状态;异常时才追加原因和「去开启」按钮
+2. **用法卡** — 规则一行 + 悬浮球用法一行 + 「打开目标应用」按钮
+3. **目标应用卡** — 勾选需要自动上滑的视频 App,默认一个都不开
+4. **规则设置卡** — 剧集/首页/广告三组关键词、扫描间隔、误滑自动回退开关、保存按钮、自动统计与重置
+5. **日志卡** — 默认折叠只显示最新一条,点标题展开全量,可清空/导出
 
 主界面是**文本类设置的唯一入口**(悬浮窗默认 `FLAG_NOT_FOCUSABLE`,不适合弹输入法)。
-总开关和「上滑一次」也放在**通知栏**;悬浮球长按可快速开关。目标应用开关仍在悬浮管理面板里。
-
----
+总开关和「上滑一次」也放在**通知栏**;悬浮球长按可快速开关。目标应用开关在主界面和悬浮面板里都能改。
 
 ## 使用
 
 1. 安装 APK,打开 App
-2. 点「去开启无障碍服务」,在系统设置中打开「广告自动跳过服务」
+2. 点「去开启无障碍服务」,在系统设置中打开「视频自动上滑服务」
 3. 点「去开启悬浮球权限」,打开「显示在其他应用上层」
 4. 允许通知(Android 13+ 首次启动会主动申请,`GuardService` 保活通知与快捷按钮需要)
-5. 进红果免费短剧刷剧
+5. 在「目标应用」里勾选要自动上滑的 App
+6. 打开该 App 刷视频
 
-主界面「规则设置」可按需修改关键词和扫描间隔;规则固定为所有关键词同时可见才不滑。
+主界面「规则设置」可按需修改三组关键词和扫描间隔。
 
 ### ⚠️ 悬浮球权限会被系统重置
 
@@ -215,26 +236,22 @@ app/src/main/java/com/autoskip/ad/
 └── MainActivity.kt                 Compose 单页界面(状态/用法/规则设置/日志)
 
 app/src/test/java/com/autoskip/ad/
-├── AdRuleTest.kt                   双关键词判定回归
+├── AdRuleTest.kt                   页面分类优先级回归
 ├── EpisodeCorrectionTest.kt        换集回退目标回归
-└── SettingsParseTest.kt            关键词/集数/倒计时解析回归
+└── SettingsParseTest.kt            关键词/集数/倒计时/命中顺序回归
 
 app/src/main/res/xml/accessibility_service_config.xml
     accessibilityEventTypes = typeWindowStateChanged | typeWindowContentChanged | typeViewScrolled
     accessibilityFlags       = flagDefault | flagReportViewIds | flagRetrieveInteractiveWindows
     canPerformGestures        = true
     canRetrieveWindowContent  = true
-    packageNames              = com.phoenix.read        (红果免费短剧)
+    (不限定 packageNames,服务接收所有 App 事件,在代码里按目标应用集合过滤)
 
 app/src/main/res/xml/file_paths.xml          日志导出目录(cache/logs)
 app/src/main/res/layout/bubble_toggle.xml    悬浮球布局
-app/src/main/res/layout/ball_panel.xml       悬浮管理面板布局
+app/src/main/res/layout/ball_panel.xml       悬浮管理面板布局(目标应用列表可滚动)
 app/src/main/res/layout/ball_panel_row.xml   面板里的目标应用行(按 KNOWN_APPS 动态生成)
 ```
-
-> **`com.dragon.read` 是番茄免费小说,不是红果。** 两家是字节同源的两个产品,
-> 连启动类都共用 `com.dragon.read.pages.splash.SplashActivity`,极易看混。
-> 红果免费短剧是 `com.phoenix.read`。
 
 无障碍服务配置要点:`flagReportViewIds` 让服务能读到 `viewIdResourceName`(resource-id);`flagRetrieveInteractiveWindows` 让 `getWindows()` 返回全部可交互窗口。
 
@@ -251,7 +268,7 @@ app/src/main/res/layout/ball_panel_row.xml   面板里的目标应用行(按 KNO
 | Compose BOM | 2024.12.01 |
 | compileSdk / targetSdk | 36(Android 16) |
 | minSdk | 26(Android 8.0) |
-| versionCode / versionName | 151 / 1.3.1 |
+| versionCode / versionName | 153 / 1.5.0 |
 
 项目自带 Gradle wrapper,无需预装 Gradle:
 
@@ -281,9 +298,9 @@ sdk.dir=C\:\\Android
 
 当前提供两个产物：
 
-- `dist/AdAutoSkipper-1.3.1-release.apk`：正式 keystore 签名，适合对外分发。
+- `dist/VideoSwipeTool-1.5.0-release.apk`：正式 keystore 签名，适合对外分发。
   已安装 debug 签名版的设备必须先卸载才能安装它。
-- `dist/AdAutoSkipper-1.3.1-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
+- `dist/VideoSwipeTool-1.5.0-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
   保留统计和设置；证书显示 `Android Debug`，不适合对外分发。
 
 临时构建 debug 签名版：把 `keystore.properties` 移走后再执行 `assembleRelease` 即可

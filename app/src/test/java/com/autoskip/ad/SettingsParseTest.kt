@@ -66,13 +66,31 @@ class SettingsParseTest {
 
     @Test
     fun `旧版本默认关键词升级后补齐第N集`() {
-        assertEquals(listOf("选集", "第N集"), AppSettings.normalizeKeywords(listOf("选集")))
+        assertEquals(listOf("选集", "第N集"), AppSettings.normalizeEpisode(listOf("选集")))
     }
 
     @Test
     fun `自定义关键词不会被强行追加第N集`() {
-        assertEquals(listOf("广告", "跳过"), AppSettings.normalizeKeywords(listOf("广告", "跳过")))
-        assertEquals(listOf("选集", "跳过"), AppSettings.normalizeKeywords(listOf("选集", "跳过")))
+        assertEquals(listOf("广告", "跳过"), AppSettings.normalizeEpisode(listOf("广告", "跳过")))
+        assertEquals(listOf("选集", "跳过"), AppSettings.normalizeEpisode(listOf("选集", "跳过")))
+    }
+
+    @Test
+    fun `命中结果按关键词列表顺序取第一个`() {
+        assertEquals(
+            "返回",
+            AdDetector.firstMatched(
+                listOf("返回", "上滑继续看短剧", "点击进入直播间"),
+                setOf("点击进入直播间", "返回", "上滑继续看短剧")
+            )
+        )
+        assertEquals(
+            "推荐",
+            AdDetector.firstMatched(
+                listOf("关注", "推荐", "首页"),
+                setOf("首页", "推荐")
+            )
+        )
     }
 
     @Test
