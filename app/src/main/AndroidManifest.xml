@@ -8,14 +8,14 @@
 
     <!--
       包可见性声明(Android 11 / API 30+ 强制):
-      targetSdk >= 30 时,没有在这里声明的包对本应用"不可见",
-      getLaunchIntentForPackage() 会直接返回 null,
-      结果是「打开红果免费短剧」按钮永远提示"未检测到"。
-      这里只声明红果免费短剧的包名,不放宽到整个系统。
-      注意 com.dragon.read 是番茄免费小说,不是红果,不要加进来。
+      需要查询已安装视频 App 的启动入口,所以声明 LAUNCHER intent;
+      不只针对某一个包,后续在设置里开启哪个目标应用都能打开。
     -->
     <queries>
-        <package android:name="com.phoenix.read" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <application

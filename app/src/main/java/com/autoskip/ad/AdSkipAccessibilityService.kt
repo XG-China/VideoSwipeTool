@@ -3,20 +3,14 @@ package com.autoskip.ad
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 
 /**
- * 红果免费短剧广告自动跳过无障碍服务(免 root):
- *  1. 只处理目标应用(默认红果免费短剧 com.phoenix.read);
- *     config 的 packageNames 已把系统事件源限定在这个包上,其他 App 完全不碰
- *     (注意 com.dragon.read 是番茄免费小说,不是红果,别混进来)
- *  2. 判定规则:关键词(默认「选集」)在树里存在但不可见 → 上滑。
- *     严格模式下来不到关键词的页面(首页/搜索页)不再误滑
+ * 通用视频广告自动上滑无障碍服务(免 root):
+ *  1. 只处理用户已开启的目标应用(默认一个都不开,由用户在 App 内选择);
+ *     服务本身接收所有 App 的事件,但在 onAccessibilityEvent 里按目标集合过滤
+ *  2. 用三组关键词判断页面:剧集页/首页不滑,广告页和未知页面上滑
  *  3. 用户手动翻页后 3 秒内一律不自动滑(不抢操作)
- *  4. 只响应"新出现"的判定(上升沿);同一状态不重复滑
- *  5. 滑完后安静 3 秒,防止误滑多次
- *  6. 判定需持续消失 ≥1 秒才算结束(防抖),再出现才视为新一轮
- *  7. 广告有观看时长限制时持续重试,重试前连续三次复核
- *  8. 悬浮球点击打开管理面板,长按快速开关总开关
  * 不做状态机、不自动点按钮、不猜倒计时文案——用户指哪打哪。
  */
 class AdSkipAccessibilityService : AccessibilityService() {
@@ -80,6 +74,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var receiverRegistered = false
     private var pendingNextTarget: Int? = null    // 已到 N+1,继续观察是否会滑到 N+2
     private var pendingNextCount = 0
+    private var lastPageKind: PageKind? = null
+    private var lastPageLogAt = 0L
 
     // 定时主动扫描:红果广告可能是静态 SurfaceView(不产生无障碍事件),
     // 只靠事件驱动会漏扫 → 必须定时轮询。间隔由设置决定(默认 1 秒)。
@@ -93,7 +89,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        AppSettings.migrateConfig(this) // 只保留红果免费短剧,清掉历史保存的其他 App
+        AppSettings.migrateConfig(this) // 清掉历史目标应用,默认由用户重新选择
         // 启动保活前台服务,防止 MIUI 冻结进程导致断连
         GuardService.start(this)
         // 注册手动上滑指令(验证手势链路 + 通知栏按钮用)
@@ -138,6 +134,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val ev = event ?: return
         val pkg = ev.packageName?.toString() ?: return
         if (pkg.startsWith("com.autoskip")) return // 不对自己 App 做动作
+        // 现在服务接收所有 App 的事件,这里只处理已开启的目标应用
+        if (pkg !in AppSettings.targetPackages(this)) return
         val now = System.currentTimeMillis()
         // 记录前台包名,作为 rootInActiveWindow 短暂为 null 时的兜底
         if (ev.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
@@ -201,6 +199,23 @@ class AdSkipAccessibilityService : AccessibilityService() {
         return pkg in AppSettings.targetPackages(this)
     }
 
+    /** 用三组关键词扫描当前页面。 */
+    private fun 扫描页面(root: AccessibilityNodeInfo): AdScan = AdDetector.scan(
+        root,
+        AppSettings.episodeKeywords(this),
+        AppSettings.homeKeywords(this),
+        AppSettings.adKeywords(this)
+    )
+
+    /** 页面分类的日志标签。 */
+    private fun 页面标签(scan: AdScan): String = when {
+        scan.adStrongVisible -> "广告页(命中「${scan.adHit}」)"
+        scan.episodeKeywordVisible -> "剧集页(命中「${scan.episodeHit}」)"
+        scan.homeKeywordVisible -> "首页(命中「${scan.homeHit}」)"
+        scan.adKeywordVisible -> "广告页(弱信号「${scan.adHit}」)"
+        else -> "广告页(未命中任何关键词)"
+    }
+
     /**
      * 执行一次扫描(定时器 + 无障碍事件都会触发)。
      * 判定规则见 [AdRule]:严格模式下只有"关键词在树里但不可见"才动手。
@@ -222,18 +237,23 @@ class AdSkipAccessibilityService : AccessibilityService() {
         // 窗口已经切走(如通知栏/系统弹窗)时绝不动手
         if (pkg.isNotEmpty() && pkg !in AppSettings.targetPackages(this)) return
 
-        val keywords = AppSettings.keywords(this)
-        val label = keywords.joinToString("/")
-        val scan = AdDetector.scan(root, keywords)
+        val scan = 扫描页面(root)
         // 记录最近一次看到的集数,作为"上滑是否换集"的基准
         AdDetector.episodeNumber(scan.episodeHeader)?.let { lastKnownEpisode = it }
-        val state = AdRule.classify(scan)
+        val page = AdRule.classify(scan)
+
+        // 页面切换日志(3 秒节流),方便排查为什么滑/不滑
+        if (page != lastPageKind && now - lastPageLogAt >= 3000L) {
+            lastPageKind = page
+            lastPageLogAt = now
+            LogBuf.add("页面判定:${页面标签(scan)}")
+        }
 
         val canSwipeAd = now >= readyAt && now >= quietUntil
                 && now - lastSwipeAt >= SWIPE_COOLDOWN_MS && now - lastUserScrollAt >= USER_SCROLL_GUARD_MS
 
-        when (state) {
-            PageState.AD -> {
+        when (page) {
+            PageKind.AD -> {
                 // 广告倒计时未结束时先等,结束后再上滑
                 val countdown = scan.countdownSeconds
                 if (countdown != null) {
@@ -265,8 +285,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
                     }
                     return
                 }
-                // 上一次自动上滑把集数滑变了:锁定一段时间,绝不再补滑,
-                // 否则会一路从第2集滑到第3、4集
+                // 上一次自动上滑把集数滑变了:锁定一段时间,绝不再补滑
                 if (now < overshootLockUntil) {
                     if (now - lastStuckLogAt >= AD_STUCK_LOG_MS) {
                         lastStuckLogAt = now
@@ -277,11 +296,10 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 lastAdClearAt = 0L // 判定成立,清零防抖计时
                 // 只响应"新出现"的判定:上升沿在手势送达成功时消耗。
                 if (!prevAdContext) {
-                    // 关键词不在树里、但顶部有「第X集」时,说明广告把整棵树替换了
                     val reason = when {
-                        scan.keywordPresent -> "找不到可见的「$label」"
-                        scan.episodeHeader != null -> "顶部有「${scan.episodeHeader}」但找不到可见的「$label」"
-                        else -> "找不到可见的「$label」"
+                        scan.adStrongVisible -> "命中广告关键词「${scan.adHit}」"
+                        scan.adKeywordVisible -> "仅命中弱广告关键词「${scan.adHit}」"
+                        else -> "未命中剧集/首页/广告关键词"
                     }
                     if (!canSwipeAd) {
                         if (now - lastCooldownLogAt >= 5000L) {
@@ -290,17 +308,17 @@ class AdSkipAccessibilityService : AccessibilityService() {
                         }
                     } else {
                         LogBuf.add("$reason($pkg): 上滑| 文字数=${scan.textCount}")
-                        swipeUpOnce("$reason,自动上滑", lastKnownEpisode)
+                        swipeUpOnce("$reason,自动上滑", lastKnownEpisode, hitKeyword = scan.adHit)
                     }
                 } else if (now - lastStuckLogAt >= AD_STUCK_LOG_MS) {
                     lastStuckLogAt = now
-                    LogBuf.add("「$label」持续不可见,等广告的观看时长限制(第 $swipeAttempts 次) 文字数=${scan.textCount}")
+                    LogBuf.add("广告页持续成立,等广告的观看时长限制(第 $swipeAttempts 次) 文字数=${scan.textCount}")
                 }
             }
 
-            PageState.NORMAL -> {
-                // 「选集」和「第N集」都在屏幕上,解除误滑锁与倒计时
-                if (scan.keywordVisible) overshootLockUntil = 0L
+            PageKind.EPISODE, PageKind.HOME -> {
+                // 剧集页/首页都不该滑;回到剧集页时解除误滑锁与倒计时
+                if (page == PageKind.EPISODE) overshootLockUntil = 0L
                 countdownUntil = 0L
                 lastCountdownValue = null
                 // 防抖动:判定需持续消失 ≥1 秒才算真结束
@@ -325,7 +343,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private fun swipeUpOnce(
         reason: String,
         episode: Int? = lastKnownEpisode,
-        manual: Boolean = false
+        manual: Boolean = false,
+        hitKeyword: String? = null
     ): Boolean {
         val now = System.currentTimeMillis()
         if (now < quietUntil) return false
@@ -370,7 +389,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
             this,
             when {
                 已送达 && manual -> "已上滑(手动)"
-                已送达 -> "已上滑,正在确认集数…"
+                已送达 && hitKeyword != null -> "命中「$hitKeyword」→ 上滑"
+                已送达 -> "广告页·无关键词 → 上滑"
                 else -> "手势未能送达"
             }
         )
@@ -393,17 +413,16 @@ class AdSkipAccessibilityService : AccessibilityService() {
             swipeEpisode = null
             return
         }
-        val keywords = AppSettings.keywords(this)
-        val label = keywords.joinToString("/")
-        val scan = AdDetector.scan(root, keywords)
+        val scan = 扫描页面(root)
+        val page = AdRule.classify(scan)
         val episode = AdDetector.episodeNumber(scan.episodeHeader)
         val episodeText = episode?.let { "第${it}集" } ?: "集数未识别"
-        LogBuf.add(
-            if (scan.keywordVisible)
-                "手动上滑完成:已上滑到$episodeText,「$label」可见(不计入统计)"
-            else
-                "手动上滑完成:已上滑到$episodeText,仍看不到「$label」(不计入统计,不自动重试)"
-        )
+        val pageText = when (page) {
+            PageKind.EPISODE -> "剧集页"
+            PageKind.HOME -> "首页"
+            PageKind.AD -> "广告页"
+        }
+        LogBuf.add("手动上滑完成:已上滑到$episodeText,当前页面:$pageText(不计入统计)")
         AdHintOverlay.show(
             this,
             episode?.let { "已上滑到第${it}集(手动)" } ?: "已上滑(集数未识别,手动)"
@@ -458,9 +477,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
             return
         }
         resultRetries = 0
-        val keywords = AppSettings.keywords(this)
-        val label = keywords.joinToString("/")
-        val scan = AdDetector.scan(root, keywords)
+        val scan = 扫描页面(root)
+        val page = AdRule.classify(scan)
         val currentEpisode = AdDetector.episodeNumber(scan.episodeHeader)
         if (currentEpisode != null) {
             lastKnownEpisode = currentEpisode
@@ -524,20 +542,30 @@ class AdSkipAccessibilityService : AccessibilityService() {
             }
         }
 
-        if (scan.keywordVisible) {
+        if (page == PageKind.EPISODE) {
             if (lastUserScrollAt > swipeAt) {
                 // 自动上滑后用户自己翻了页,这一轮不能算作"自动跳过成功"
-                LogBuf.add("「$label」已恢复,但期间有用户手动翻页,本次不计入跳过统计")
+                LogBuf.add("已回到剧集页,但期间有用户手动翻页,本次不计入跳过统计")
             } else {
                 AppSettings.recordSkip(this)
                 val episodeText = currentEpisode?.let { "第${it}集" } ?: "集数未识别"
-                LogBuf.add("已确认:「$label」回来了,已上滑到$episodeText,跳过成功 ✓(本轮共滑 $swipeAttempts 次,${AppSettings.statsText(this)})")
+                LogBuf.add("已确认回到剧集页(命中「${scan.episodeHit}」),已上滑到$episodeText,跳过成功 ✓(本轮共滑 $swipeAttempts 次,${AppSettings.statsText(this)})")
             }
             swipeAttempts = 0
             missSamples = 0
+            prevAdContext = false
+            swipeEpisode = null
             return
         }
-        // 关键词还没回来,继续走复核/重试链
+        if (page == PageKind.HOME) {
+            LogBuf.add("已到首页(命中「${scan.homeHit}」),停止本轮重试")
+            swipeAttempts = 0
+            missSamples = 0
+            prevAdContext = false
+            swipeEpisode = null
+            return
+        }
+        // 仍是广告页,继续走复核/重试链
         if (missSamples < REQUIRED_MISS_SAMPLES) {
             missSamples++
             handler.postDelayed(Runnable { checkSwipeResult() }, AppSettings.scanIntervalMs(this))
@@ -545,11 +573,11 @@ class AdSkipAccessibilityService : AccessibilityService() {
         }
         missSamples = 0
         if (swipeAttempts >= MAX_SWIPE_ATTEMPTS) {
-            LogBuf.add("已连滑 $MAX_SWIPE_ATTEMPTS 次仍看不到「$label」,停止重试(可能是不给跳的插屏广告)")
+            LogBuf.add("已连滑 $MAX_SWIPE_ATTEMPTS 次仍停留在广告页,停止重试(可能是不给跳的插屏广告)")
             return
         }
-        LogBuf.add("上滑后仍看不到「$label」(已复核 $REQUIRED_MISS_SAMPLES 次)→ 第 $swipeAttempts 次重试")
-        if (!swipeUpOnce("第 $swipeAttempts 次重试", swipeEpisode ?: lastKnownEpisode)) {
+        LogBuf.add("上滑后仍是广告页(已复核 $REQUIRED_MISS_SAMPLES 次)→ 第 $swipeAttempts 次重试")
+        if (!swipeUpOnce("第 $swipeAttempts 次重试", swipeEpisode ?: lastKnownEpisode, hitKeyword = scan.adHit)) {
             handler.postDelayed(Runnable { checkSwipeResult() }, 1000L)
         }
     }
@@ -578,7 +606,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         }
         val root = rootInActiveWindow
         val current = root?.let {
-            AdDetector.episodeNumber(AdDetector.scan(it, AppSettings.keywords(this)).episodeHeader)
+            AdDetector.episodeNumber(扫描页面(it).episodeHeader)
         }
         if (current != null && current > target) {
             LogBuf.add("确认期内集数变成第 $current 集,超过第 $target 集,开始回退")
@@ -671,8 +699,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
             retryCorrectionOrFinish(target)
             return
         }
-        val keywords = AppSettings.keywords(this)
-        val scan = AdDetector.scan(root, keywords)
+        val scan = 扫描页面(root)
         val current = AdDetector.episodeNumber(scan.episodeHeader)
         if (current == null) {
             retryCorrectionOrFinish(target)

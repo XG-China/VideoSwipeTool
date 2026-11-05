@@ -18,19 +18,21 @@ object LogExporter {
         runCatching {
             val dir = File(ctx.cacheDir, "logs").apply { mkdirs() }
             val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
-            val file = File(dir, "autoskip-$stamp.txt")
+            val file = File(dir, "video-swipe-$stamp.txt")
             val version = runCatching {
                 ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
             }.getOrNull().orEmpty()
 
             file.writeText(
                 buildString {
-                    appendLine("AutoSkip 运行日志")
+                    appendLine("视频上滑工具运行日志")
                     appendLine("版本: $version")
                     appendLine("时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
                     appendLine("统计: ${AppSettings.statsText(ctx)}")
                     appendLine("自动回退: ${AppSettings.autoCorrectEpisode(ctx)}")
-                    appendLine("关键词: ${AppSettings.keywords(ctx).joinToString("/")}")
+                    appendLine("剧集关键词: ${AppSettings.episodeKeywords(ctx).joinToString("/")}")
+                    appendLine("首页关键词: ${AppSettings.homeKeywords(ctx).joinToString("/")}")
+                    appendLine("广告关键词: ${AppSettings.adKeywords(ctx).joinToString("/")}")
                     appendLine("扫描间隔: ${AppSettings.scanIntervalMs(ctx)} ms")
                     appendLine("----------------------------------------")
                     LogBuf.snapshot().forEach { appendLine(it) }
@@ -41,8 +43,8 @@ object LogExporter {
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
                 putExtra(Intent.EXTRA_STREAM, uri)
-                putExtra(Intent.EXTRA_SUBJECT, "AutoSkip 运行日志")
-                clipData = android.content.ClipData.newRawUri("AutoSkip 运行日志", uri)
+                putExtra(Intent.EXTRA_SUBJECT, "视频上滑工具日志")
+                clipData = android.content.ClipData.newRawUri("视频上滑工具日志", uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             val chooser = Intent.createChooser(send, "导出运行日志")

@@ -67,7 +67,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import kotlinx.coroutines.delay
 
-private val BrandRed = Color(0xFFE53935)   // 主色:红果红
+private val BrandRed = Color(0xFFE53935)   // 主色:品牌红
 private val OkGreen = Color(0xFF2E7D32)    // 状态正常
 private val WarnRed = Color(0xFFC62828)    // 状态异常
 
@@ -100,6 +100,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppSettings.migrateConfig(this)
         // Android 15+ 强制 edge-to-edge:顶部是红色标题栏,状态栏图标用浅色;
         // 底部是浅色内容区,导航栏图标用深色
         WindowCompat.getInsetsController(window, window.decorView).apply {
@@ -121,6 +122,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        AppSettings.migrateConfig(this)
         val enabled = isAccessibilityEnabled(this)
         accConnected.value = enabled
         // 无障碍服务在后台启动前台服务可能被 Android 12+ 拒绝;
@@ -162,6 +164,7 @@ private fun RootScreen(accConnected: Boolean) {
     var overlayOn by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     var logs by remember { mutableStateOf(emptyList<String>()) }
     var stats by remember { mutableStateOf(AppSettings.statsText(ctx)) }
+    var enabledTargets by remember { mutableStateOf(AppSettings.targetPackages(ctx)) }
 
     // Android 13+ 通知权限:GuardService 的保活通知需要它
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -181,6 +184,7 @@ private fun RootScreen(accConnected: Boolean) {
             // 悬浮窗权限随时可能在系统设置里被改,轮询才能立刻反映出来
             overlayOn = Settings.canDrawOverlays(ctx)
             stats = AppSettings.statsText(ctx)
+            enabledTargets = AppSettings.targetPackages(ctx)
             delay(1000)
         }
     }
@@ -201,10 +205,19 @@ private fun RootScreen(accConnected: Boolean) {
             StatusCard(
                 accOn = accOn,
                 overlayOn = overlayOn,
+                hasTarget = enabledTargets.isNotEmpty(),
                 onOpenAccessibility = { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
                 onOpenOverlay = { ctx.startActivity(overlaySettingsIntent(ctx)) }
             )
-            UsageCard(onOpenApp = { launchHongGuo(ctx) })
+            UsageCard(onOpenApp = { launchTargetApp(ctx) })
+            TargetAppsCard(
+                enabled = enabledTargets,
+                onToggle = { app, on ->
+                    AppSettings.setTargetPackage(ctx, app.pkg, on)
+                    enabledTargets = AppSettings.targetPackages(ctx)
+                    LogBuf.add("目标应用:${app.name} ${if (on) "开启" else "关闭"}")
+                }
+            )
             RuleSettingsCard(
                 statsText = stats,
                 onStatsReset = {
@@ -230,7 +243,7 @@ private fun RootScreen(accConnected: Boolean) {
 @Composable
 private fun AppTopBar() {
     CenterAlignedTopAppBar(
-        title = { Text("红果免费短剧广告跳过", fontWeight = FontWeight.Bold) },
+        title = { Text("通用视频上滑工具", fontWeight = FontWeight.Bold) },
         colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
             containerColor = BrandRed,
             titleContentColor = Color.White
@@ -238,24 +251,60 @@ private fun AppTopBar() {
     )
 }
 
+// ---------- 目标应用卡 ----------
+@Composable
+private fun TargetAppsCard(
+    enabled: Set<String>,
+    onToggle: (AppSettings.AppInfo, Boolean) -> Unit
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            SectionTitle("目标应用")
+            Text(
+                "默认一个都不开。勾选需要自动上滑的视频 App;悬浮球面板里也能改。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            AppSettings.KNOWN_APPS.forEach { app ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        app.name,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = app.pkg in enabled,
+                        onCheckedChange = { onToggle(app, it) }
+                    )
+                }
+            }
+        }
+    }
+}
+
 // ---------- 状态卡 ----------
 @Composable
 private fun StatusCard(
     accOn: Boolean,
     overlayOn: Boolean,
+    hasTarget: Boolean,
     onOpenAccessibility: () -> Unit,
     onOpenOverlay: () -> Unit
 ) {
     Card(
         Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = if (accOn && overlayOn) MaterialTheme.colorScheme.surface
+            containerColor = if (accOn && overlayOn && hasTarget) MaterialTheme.colorScheme.surface
             else MaterialTheme.colorScheme.primaryContainer
         )
     ) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             StatusRow("无障碍服务", accOn, if (accOn) null else "开启后才能自动上滑")
             StatusRow("悬浮球", overlayOn, if (overlayOn) null else "缺少「显示在其他应用上层」权限")
+            StatusRow("目标应用", hasTarget, if (hasTarget) null else "在下方选择要开启的视频 App")
             if (!accOn) ActionButton("去开启无障碍服务", onOpenAccessibility)
             if (!overlayOn) ActionButton("去开启悬浮球权限", onOpenOverlay)
         }
@@ -318,17 +367,22 @@ private fun UsageCard(onOpenApp: () -> Unit) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SectionTitle("用法")
             Text(
-                "屏幕上同时出现所有关键词时不动;缺任意一个就自动上滑。",
+                "命中广告页关键词时自动上滑;剧集页和首页不滑。",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Text(
-                "点屏幕边缘的小球打开管理面板,长按小球快速开关;总开关也在面板里改。",
+                "先在下方选择目标应用;点屏幕边缘的小球打开管理面板,长按小球快速开关。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Text(
+                "无网络权限,所有判断都在本地完成。",
+                style = MaterialTheme.typography.bodySmall,
+                color = OkGreen
+            )
             OutlinedButton(onClick = onOpenApp, modifier = Modifier.fillMaxWidth()) {
-                Text("打开${AppSettings.KNOWN_APPS.first().name}")
+                Text("打开目标应用")
             }
         }
     }
@@ -338,19 +392,27 @@ private fun UsageCard(onOpenApp: () -> Unit) {
 @Composable
 private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
     val ctx = LocalContext.current
-    var keywords by remember { mutableStateOf(AppSettings.keywords(ctx).joinToString("、")) }
+    var episodeKeywords by remember { mutableStateOf(AppSettings.episodeKeywords(ctx).joinToString("、")) }
+    var homeKeywords by remember { mutableStateOf(AppSettings.homeKeywords(ctx).joinToString("、")) }
+    var adKeywords by remember { mutableStateOf(AppSettings.adKeywords(ctx).joinToString("、")) }
     var intervalMs by remember { mutableStateOf(AppSettings.scanIntervalMs(ctx).toInt()) }
     var savedHint by remember { mutableStateOf("") }
     var autoCorrect by remember { mutableStateOf(AppSettings.autoCorrectEpisode(ctx)) }
 
     fun saveAll() {
-        AppSettings.setKeywords(ctx, keywords)
+        AppSettings.setEpisodeKeywords(ctx, episodeKeywords)
+        AppSettings.setHomeKeywords(ctx, homeKeywords)
+        AppSettings.setAdKeywords(ctx, adKeywords)
         AppSettings.setScanIntervalMs(ctx, intervalMs.toLong())
-        keywords = AppSettings.keywords(ctx).joinToString("、")
+        episodeKeywords = AppSettings.episodeKeywords(ctx).joinToString("、")
+        homeKeywords = AppSettings.homeKeywords(ctx).joinToString("、")
+        adKeywords = AppSettings.adKeywords(ctx).joinToString("、")
         intervalMs = AppSettings.scanIntervalMs(ctx).toInt()
         savedHint = "已保存"
         LogBuf.add(
-            "规则已更新:关键词=${AppSettings.keywords(ctx).joinToString("/")}, 间隔=${intervalMs}ms"
+            "规则已更新:剧集=${AppSettings.episodeKeywords(ctx).joinToString("/")}, " +
+                "首页=${AppSettings.homeKeywords(ctx).joinToString("/")}, " +
+                "广告=${AppSettings.adKeywords(ctx).joinToString("/")}, 间隔=${intervalMs}ms"
         )
     }
 
@@ -359,18 +421,44 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
             SectionTitle("规则设置")
 
             Text(
-                "判定方式:所有关键词同时可见才不滑,缺任意一个就上滑。关键词可以改成别的,规则不变。",
+                "用关键词判断当前页面:剧集页和首页不滑;广告页上滑。" +
+                    "剧集页命中「选集/第N集」,首页命中「关注/推荐/首页」,广告页命中「返回/上滑继续看短剧/点击进入直播间」;" +
+                    "如果什么都没命中,也按广告页上滑。广告里的「返回」是弱信号,有剧集/首页关键词时不生效。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             OutlinedTextField(
-                value = keywords,
+                value = episodeKeywords,
                 onValueChange = {
-                    keywords = it
+                    episodeKeywords = it
                     savedHint = ""
                 },
-                label = { Text("判定关键词(逗号分隔,N=任意数字)") },
+                label = { Text("剧集页关键词(选集/第N集)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+            )
+
+            OutlinedTextField(
+                value = homeKeywords,
+                onValueChange = {
+                    homeKeywords = it
+                    savedHint = ""
+                },
+                label = { Text("首页关键词(关注/推荐/首页)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+            )
+
+            OutlinedTextField(
+                value = adKeywords,
+                onValueChange = {
+                    adKeywords = it
+                    savedHint = ""
+                },
+                label = { Text("广告页关键词(返回/上滑继续看短剧/点击进入直播间)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
@@ -505,14 +593,19 @@ private fun StatusDot(ok: Boolean) {
 }
 
 // ---------- 其他 ----------
-private fun launchHongGuo(ctx: Context) {
-    val launch = AppSettings.KNOWN_APPS.mapNotNull { app ->
+private fun launchTargetApp(ctx: Context) {
+    val targets = AppSettings.KNOWN_APPS.filter { it.pkg in AppSettings.targetPackages(ctx) }
+    if (targets.isEmpty()) {
+        Toast.makeText(ctx, "请先在目标应用里选择要开启的 App", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val launch = targets.firstNotNullOfOrNull { app ->
         ctx.packageManager.getLaunchIntentForPackage(app.pkg)
-    }.firstOrNull()
+    }
     if (launch != null) {
         runCatching { ctx.startActivity(launch) }
             .onFailure { Toast.makeText(ctx, "打开失败", Toast.LENGTH_SHORT).show() }
     } else {
-        Toast.makeText(ctx, "未检测到${AppSettings.KNOWN_APPS.first().name}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(ctx, "未检测到已开启的目标应用", Toast.LENGTH_SHORT).show()
     }
 }

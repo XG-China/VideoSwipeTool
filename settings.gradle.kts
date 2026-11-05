@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "AdAutoSkipper"
+rootProject.name = "VideoSwipeTool"
 include(":app")

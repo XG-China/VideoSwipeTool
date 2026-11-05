@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">广告自动跳过</string>
-    <string name="accessibility_service_label">广告自动跳过服务</string>
-    <string name="accessibility_service_description">识别红果免费短剧中的应用内广告:播放页的「选集」被广告盖住(节点仍在但不可见)时判定为广告,自动上滑跳过。仅对红果免费短剧生效,不上传任何数据。</string>
+    <string name="app_name">通用视频上滑工具</string>
+    <string name="accessibility_service_label">视频自动上滑服务</string>
+    <string name="accessibility_service_description">识别目标视频应用中的广告页面并自动上滑。默认不开启任何应用,请在 App 内选择需要自动上滑的视频应用。仅本地判断,不上传任何数据。</string>
 </resources>
