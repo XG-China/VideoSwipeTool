@@ -72,6 +72,10 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var countdownUntil = 0L               // 广告倒计时预计结束时刻
     private var lastCountdownValue: Int? = null   // 上一次看到的倒计时秒数
     private var countdownValueAt = 0L
+    private var countdownConsumed = false         // 本次广告的门槛已经等过,绝不再重复计时
+    private var lastOcrEpisode: Int? = null       // OCR 读到的当前集数(用于校正无障碍树的旧值)
+    private var lastOcrEpisodeAt = 0L
+    private var overshootCandidate: Int? = null   // 疑似跳集,等待二次复核后才回退
     private var episodeReadRetries = 0            // 换页动画期间读不到集数时重试次数
     private var episodeHintShown = false           // 本轮上滑是否已经提示过集数
     private var resultRetries = 0                 // 拿不到窗口时的重试次数
@@ -96,6 +100,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var ocrStartedAt = 0L                   // 本次识字开始时刻(用于丢弃滑走后的迟到结果)
     private var ocrWaitUntil = 0L                   // 首次进广告页时等待识字结果的截止时刻
     private var ocrEpisodeUntil = 0L                // OCR 看到「选集」时暂缓上滑的截止时刻
+    private var lastAdEvidenceAt = 0L                // 最近一次确认广告信号的时刻(防止倒计时被剧集页扫描重置)
     private var ocrRequestedAt = 0L                 // 收到窗口/滚动/子树变化后请求尽快识字
     private var cachedTargets: Set<String> = emptySet() // 缓存目标包,避免高频内容事件里反复读 SharedPreferences
     private var lastClassifiedPage: PageKind? = null // 最近一次无障碍分类结果,用于丢弃过期的 OCR 结果
@@ -482,6 +487,22 @@ class AdSkipAccessibilityService : AccessibilityService() {
         // 行间用空串拼接:OCR 可能把一个词组拆成多行,不能加空格
         val joined = lines.joinToString("")
         val sample = lines.joinToString("|")
+        // 剧集页:记下 OCR 看到的「第N集」。
+        // 无障碍树里的集数有时是上一集/推荐卡片的残留,十字校验可避免误回退。
+        if (page == PageKind.EPISODE) {
+            val ocrEp = parseOcrEpisode(joined)
+            if (ocrEp != null && ocrEp != lastOcrEpisode) {
+                if (lastOcrEpisode != null && ocrEp != lastOcrEpisode &&
+                    now - lastOcrEpisodeAt < 10_000L
+                ) {
+                    LogBuf.add("[集数] OCR 从第${lastOcrEpisode}集变为第${ocrEp}集")
+                }
+                lastOcrEpisode = ocrEp
+                lastOcrEpisodeAt = now
+            } else if (ocrEp != null) {
+                lastOcrEpisodeAt = now
+            }
+        }
         val adKeywords = AppSettings.adKeywords(this)
         val strongWords = adKeywords.filter {
             it != "返回" && it != "直播中" && it != "直播间"
@@ -491,7 +512,17 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val sawLive = OcrMatcher.matches(joined, "直播中") ||
             OcrMatcher.matches(joined, "直播间")
         val sawBack = OcrMatcher.matches(joined, "返回")
-        val topBack = result.topLines.any { OcrMatcher.matches(it, "返回") }
+
+        // 用户规则:屏幕上还能清楚看到「选集」时,说明仍是剧集页,不自动上滑。
+        // 只有广告真正盖住内容、OCR 读不到「选集」时才允许按广告处理。
+        if (page != PageKind.HOME && sawEpisode) {
+            ocrEpisodeUntil = now + OCR_FORCE_MS
+            if (now - lastOcrLogAt >= 15_000L) {
+                lastOcrLogAt = now
+                LogBuf.add("[OCR] 看到「选集」,保持剧集页,不自动上滑(耗时=${cost}ms)")
+            }
+            return
+        }
 
         val hit: String? = when {
             // 广告专属文案(上滑继续看短剧/点击进入直播间)最强,任何时候都认
@@ -500,10 +531,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
             page == PageKind.AD && sawBack -> "返回"
             page == PageKind.AD && sawLive ->
                 if (OcrMatcher.matches(joined, "直播中")) "直播中" else "直播间"
-            // 树说剧集页,但屏幕出现了「返回」文字 → 多半是广告遮罩。
-            // 红果正常剧集页左上角是返回图标(没有文字),OCR 读不到「返回」两个字。
-            // 首页不做这个覆盖,避免把首页卡片里的「返回」误当成广告。
-            page == PageKind.EPISODE && (topBack || (sawBack && !sawEpisode)) -> "返回"
+            // 剧集页出现「返回」不再算广告:
+            // 选集面板/金币弹窗盖住集数时也会有「返回」,之前因此误上滑。
             else -> null
         }
 
@@ -532,6 +561,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         }
         ocrForcedAdUntil = now + OCR_FORCE_MS
         ocrHitKeyword = hit
+        lastAdEvidenceAt = now
         LogBuf.add(
             "[OCR] 命中「$hit」→ 强制判定广告页 ${OCR_FORCE_MS / 1000}s " +
                 "(${页面名称(page)}) 耗时=${cost}ms | 文字=${sample.take(140)}"
@@ -539,6 +569,52 @@ class AdSkipAccessibilityService : AccessibilityService() {
         // 强制判定立即生效:清零扫描节流时间再补一次
         lastScanAt = 0L
         handler.postDelayed({ 执行扫描() }, 200L)
+    }
+
+    /**
+     * 从 OCR 文本里解析「第N集」。
+     * 只用来和 UI 树交叉校验:两边不一致时宁可不回退。
+     */
+    /**
+     * 计算可信的集数基准:
+     * - 10 秒内 OCR 读到过集数时,以 OCR 为准(它看的是当前画面)
+     * - 树和 OCR 不一致时返回 null,表示本轮不参与回退,避免把正常下一集误判成跳集
+     */
+    private fun trustedEpisode(treeEpisode: Int?): Int? {
+        val ocr = lastOcrEpisode
+        val fresh = ocr != null &&
+            System.currentTimeMillis() - lastOcrEpisodeAt <= 10_000L
+        // OCR 开启时必须有近 10 秒的交叉确认,否则宁可不回退:
+        // 重装后首屏、换页动画、树节点滞后都可能读错集数。
+        if (!fresh) {
+            if (treeEpisode != null && AppSettings.ocrEnabled(this)) {
+                LogBuf.add("[集数] 第${treeEpisode}集还没有 OCR 交叉确认,本轮不做集数回退")
+            }
+            return if (AppSettings.ocrEnabled(this)) null else treeEpisode
+        }
+        return when {
+            treeEpisode == null -> ocr
+            ocr == treeEpisode -> treeEpisode
+            else -> {
+                LogBuf.add(
+                    "[集数] 树=第${treeEpisode}集 / OCR=第${ocr}集,不一致," +
+                        "本轮不做集数回退"
+                )
+                null
+            }
+        }
+    }
+
+    private fun parseOcrEpisode(text: String): Int? {
+        val re = Regex("第\\s*([0-9]{1,4})\\s*集")
+        for (m in re.findAll(text)) {
+            val start = m.range.first
+            val before = text.substring(maxOf(0, start - 2), start)
+            if (before.any { it == '全' || it == '共' || it == '已' || it == '至' }) continue
+            val n = m.groupValues[1].toIntOrNull() ?: continue
+            if (n in 1..999) return n
+        }
+        return null
     }
 
     private fun 页面名称(page: PageKind): String = when (page) {
@@ -621,17 +697,13 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val page = AdRule.classify(scan)
         lastClassifiedPage = page
 
-        // 广告盖在剧集页上时,树里可能只剩下「选集」+「返回」,真正的「第N集」标题被盖住。
-        // 连续 1.5 秒都是"剧集页 + 返回 + 无集数标题"就按广告页处理,
-        // 这样即使 OCR 卡住/没识别出来也不会一直不动。
-        val weakAdOnEpisode = page == PageKind.EPISODE &&
-            scan.adKeywordVisible && scan.episodeHeader == null
-        if (weakAdOnEpisode) {
-            if (weakAdEpisodeSince == 0L) weakAdEpisodeSince = now
-        } else {
-            weakAdEpisodeSince = 0L
-        }
-        val weakAdConfirmed = weakAdOnEpisode && now - weakAdEpisodeSince >= 1500L
+        // 「返回」是弱信号:金币弹窗、活动浮层、选集面板都可能有返回按钮。
+        // 以前"剧集页 + 返回 + 集数标题被挡"就按广告页上滑,
+        // 结果弹窗盖住集数时会把正常剧集滑走。
+        // 现在只认强广告信号(上滑继续看短剧/直播/广告遮罩 view),
+        // 屏幕上还能看到「选集」时绝不因为「返回」而自动上滑。
+        weakAdEpisodeSince = 0L
+        val weakAdConfirmed = false
 
         // 剧集标题短暂读不到(换页动画)不算,持续 1.5 秒读不到才值得识字
         val headerMissing = page == PageKind.EPISODE && scan.episodeHeader == null
@@ -656,6 +728,9 @@ class AdSkipAccessibilityService : AccessibilityService() {
 
         val forcedByOcr = now < ocrForcedAdUntil
         if (!forcedByOcr) ocrHitKeyword = null
+        if (forcedByOcr || scan.adStrongVisible || scan.adViewHit != null) {
+            lastAdEvidenceAt = now
+        }
         // 无障碍树既没有强广告词、也没有「返回」时,先让全屏识字看一帧再决定
         val needOcrConfirm = page == PageKind.AD && !scan.adStrongVisible && !scan.adKeywordVisible
         if (!forcedByOcr && needOcrConfirm) {
@@ -711,24 +786,38 @@ class AdSkipAccessibilityService : AccessibilityService() {
             PageKind.AD -> {
                 // 广告倒计时未结束时先等,结束后再上滑
                 val countdown = scan.countdownSeconds
-                if (countdown != null) {
-                    if (lastCountdownValue == null) {
+                if (countdown != null && !countdownConsumed) {
+                    val seen = lastCountdownValue
+                    if (seen == null) {
                         LogBuf.add("[倒计时] 检测到 ${countdown}s,等待结束后再上滑")
-                    }
-                    if (countdown != lastCountdownValue) {
                         lastCountdownValue = countdown
                         countdownValueAt = now
                         countdownUntil = (now + countdown * 1000L + 1200L)
                             .coerceAtMost(now + 61_000L)
+                    } else if (countdown < seen) {
+                        // 数字确实在变小:只缩短,不延长
+                        lastCountdownValue = countdown
+                        countdownValueAt = now
+                        val next = (now + countdown * 1000L + 1200L)
+                            .coerceAtMost(now + 61_000L)
+                        if (countdownUntil == 0L || next < countdownUntil) {
+                            countdownUntil = next
+                        }
                     } else if (now - countdownValueAt > 8000L) {
-                        // 文本一直不变,可能不是真倒计时,不再无限等待
+                        // 文案一直显示同一个数字(常见:N秒后可继续上滑),
+                        // 不是真的倒数:按静态门槛等满 8 秒即可,之后不再重复计时
+                        countdownConsumed = true
                         countdownUntil = 0L
+                        LogBuf.add("[倒计时] 文案未变化,按静态门槛处理,可以上滑")
                     }
-                } else {
+                } else if (countdown == null && now - lastAdEvidenceAt > 4000L) {
+                    // 广告证据也消失 4 秒以上,才认为倒计时结束;
+                    // 页面在广告页/剧集页之间跳时不会清空,避免重复计时。
                     if (lastCountdownValue != null) {
                         LogBuf.add("[倒计时] 结束,继续判定")
                     }
                     lastCountdownValue = null
+                    countdownUntil = 0L
                 }
                 if (now < countdownUntil) {
                     lastAdClearAt = 0L
@@ -821,8 +910,14 @@ class AdSkipAccessibilityService : AccessibilityService() {
             PageKind.EPISODE, PageKind.HOME -> {
                 // 剧集页/首页都不该滑;回到剧集页时解除误滑锁与倒计时
                 if (page == PageKind.EPISODE) overshootLockUntil = 0L
-                countdownUntil = 0L
-                lastCountdownValue = null
+                // 广告遮罩期间页面会在「广告页/剧集页」之间来回跳;
+                // 最近 10 秒确认过广告时,不要清空倒计时,否则 7 秒门槛会被反复重置。
+                val adRecent = now < ocrForcedAdUntil || now - lastAdEvidenceAt < 10_000L
+                if (!adRecent) {
+                    countdownUntil = 0L
+                    lastCountdownValue = null
+                    countdownConsumed = false
+                }
                 // 离开广告页,下一轮广告重新做一次识字确认
                 ocrCheckedForCurrentAd = false
                 ocrWaitUntil = 0L
@@ -855,6 +950,9 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val now = System.currentTimeMillis()
         if (now < quietUntil) return false
         if (now - lastSwipeAt < t(Timing.SWIPE_COOLDOWN)) return false
+        // 回退基准必须可信:树里的集数可能是上一集/推荐卡片的残留,
+        // 10 秒内的 OCR 读数优先;两边不一致时不做回退。
+        val startEpisode = trustedEpisode(episode)
         lastSwipeAt = now
         quietUntil = now + t(Timing.QUIET)
         if (manual) {
@@ -882,8 +980,9 @@ class AdSkipAccessibilityService : AccessibilityService() {
             } else {
                 missSamples = 0
                 prevAdContext = true
-                swipeEpisode = episode
+                swipeEpisode = startEpisode
                 swipeAt = now
+                overshootCandidate = null
                 episodeReadRetries = 0
                 episodeHintShown = false
                 resultRetries = 0
@@ -894,7 +993,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
             }
         }
         val attempt = if (manual) "手动" else "第 $swipeAttempts 次"
-        val start = episode?.let { "第${it}集" } ?: "集数未知"
+        val start = startEpisode?.let { "第${it}集" } ?: "集数未知"
         val quietSeconds = t(Timing.QUIET) / 1000.0
         LogBuf.add(
             if (已送达) "[上滑] $reason,$attempt,起点=$start → ${"%.1f".format(quietSeconds)} 秒后校验${if (manual) "(手动不计入统计)" else ""}"
@@ -970,6 +1069,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
             postCorrectionUntil = 0L
             countdownUntil = 0L
             lastCountdownValue = null
+            countdownConsumed = false
             pendingNextTarget = null
             pendingNextCount = 0
             swipeAttempts = 0
@@ -1033,9 +1133,11 @@ class AdSkipAccessibilityService : AccessibilityService() {
             ) {
                 EpisodeOutcome.Same -> {
                     // 没换集,继续走正常的关键词可见校验
+                    overshootCandidate = null
                 }
 
                 EpisodeOutcome.Next -> {
+                    overshootCandidate = null
                     // 3 秒校验只看到 N+1 还不能收工:视频流的惯性/自动连播可能继续走到 N+2。
                     // 进入确认期,再观察最多约 6 秒。
                     pendingNextTarget = currentEpisode
@@ -1047,13 +1149,30 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 }
 
                 is EpisodeOutcome.CorrectTo -> {
-                    LogBuf.add("集数从第 $fromEpisode 集跳到第 $currentEpisode 集,超过预期第 ${outcome.target} 集,开始下滑回退")
+                    // 读集数偶尔会错(树滞后/换页动画/重装后首屏)。
+                    // 先等 1.2 秒复核一次,仍然是同一集才开始下滑回退。
+                    if (overshootCandidate != currentEpisode) {
+                        overshootCandidate = currentEpisode
+                        LogBuf.add(
+                            "集数从第 $fromEpisode 集跳到第 $currentEpisode 集," +
+                                "疑似跳集,1.2 秒后复核再决定是否回退"
+                        )
+                        resultTask = Runnable { checkSwipeResult() }
+                        handler.postDelayed(resultTask!!, 1200L)
+                        return
+                    }
+                    LogBuf.add(
+                        "复核确认:从第 $fromEpisode 集跳到第 $currentEpisode 集," +
+                            "超过预期第 ${outcome.target} 集,开始下滑回退"
+                    )
+                    overshootCandidate = null
                     overshootLockUntil = System.currentTimeMillis() + 20_000L
                     startCorrection(outcome.target)
                     return
                 }
 
                 EpisodeOutcome.Misfire -> {
+                    overshootCandidate = null
                     LogBuf.add("检测到集数从第 $fromEpisode 集变为第 $currentEpisode 集,判定为误滑,停止本轮重试")
                     AdHintOverlay.show(this, "误滑到第${currentEpisode}集,已停止")
                     overshootLockUntil = System.currentTimeMillis() + 20_000L
@@ -1288,6 +1407,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         swipeAttempts = 0
         missSamples = 0
         prevAdContext = false
+        overshootCandidate = null
     }
 
     private fun finishCorrection(reason: String) {
@@ -1301,6 +1421,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         swipeAttempts = 0
         missSamples = 0
         prevAdContext = false
+        overshootCandidate = null
         // 回退失败时保持锁定,避免马上又自动上滑再次跳集
         overshootLockUntil = System.currentTimeMillis() + 20_000L
         resumeScanAt = System.currentTimeMillis() + 2000L
@@ -1326,6 +1447,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
             postCorrectionUntil = 0L
             countdownUntil = 0L
             lastCountdownValue = null
+            countdownConsumed = false
             pendingNextTarget = null
             pendingNextCount = 0
             lastSwipeAt = 0L

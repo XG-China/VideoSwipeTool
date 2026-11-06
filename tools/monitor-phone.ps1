@@ -20,7 +20,15 @@ $crashFile = Join-Path $out "crash.log"
 function Write-Status([string]$msg) {
     Add-Content -Path $statusFile -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $msg)
 }
-function Write-Alert([string]$msg) {
+$lastAlertAt = @{}
+function Write-Alert([string]$msg, [int]$CooldownSeconds = 90) {
+    # 同一类告警在冷却期内只记一次,避免 OCR/页面反复命中时刷屏
+    $nowAlert = Get-Date
+    if ($lastAlertAt.ContainsKey($msg) -and
+        ($nowAlert - $lastAlertAt[$msg]).TotalSeconds -lt $CooldownSeconds) {
+        return
+    }
+    $lastAlertAt[$msg] = $nowAlert
     Add-Content -Path $alertFile -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $msg)
     Write-Status "ALERT $msg"
 }
@@ -43,11 +51,11 @@ function Parse-LogTime([string]$line) {
 
 # 持续抓 logcat(主日志 + crash)
 $logProc = Start-Process -FilePath $Adb `
-    -ArgumentList @("-s", $Serial, "logcat", "-v", "time", "-s", "AutoSkip:V") `
+    -ArgumentList @("-s", $Serial, "logcat", "-T", "1", "-v", "time", "-s", "AutoSkip:V") `
     -RedirectStandardOutput $logFile -RedirectStandardError (Join-Path $out "logcat.err") `
     -PassThru -WindowStyle Hidden
 $crashProc = Start-Process -FilePath $Adb `
-    -ArgumentList @("-s", $Serial, "logcat", "-b", "crash", "-v", "time") `
+    -ArgumentList @("-s", $Serial, "logcat", "-b", "crash", "-T", "1", "-v", "time") `
     -RedirectStandardOutput $crashFile -RedirectStandardError (Join-Path $out "crash.err") `
     -PassThru -WindowStyle Hidden
 
@@ -66,6 +74,13 @@ $lastSwipeAt = [datetime]::MinValue
 $lastPageAt = [datetime]::MinValue
 $lastPageLine = ""
 $lastCrashSize = 0L
+$lastHeavyAt = [datetime]::MinValue
+$cachedTop = ""
+$cachedAcc = ""
+$lastOcrHitAt = [datetime]::MinValue
+$lastMisfireAt = [datetime]::MinValue
+$lastAlertedOcrHitAt = [datetime]::MinValue
+$lastAlertedMisfireAt = [datetime]::MinValue
 
 while ((Get-Date) -lt $deadline) {
     $now = Get-Date
@@ -85,12 +100,19 @@ while ((Get-Date) -lt $deadline) {
         Write-Status "woke device"
     }
 
-    $top = (& $Adb -s $Serial shell "dumpsys activity activities | grep -m1 mResumedActivity" 2>$null | Out-String).Trim()
-    $acc = (& $Adb -s $Serial shell "dumpsys accessibility | grep -E 'Bound services|Crashed services'" 2>$null | Out-String).Trim()
+    # dumpsys activity/accessibility 比较重,30 秒刷新一次即可;
+    # get-state / 电量 / pid 仍然每轮检查。
+    if (($now - $lastHeavyAt).TotalSeconds -ge 30) {
+        $lastHeavyAt = $now
+        $cachedTop = (& $Adb -s $Serial shell "dumpsys activity activities | grep -m1 mResumedActivity" 2>$null | Out-String).Trim()
+        $cachedAcc = (& $Adb -s $Serial shell "dumpsys accessibility | grep -E 'Bound services|Crashed services'" 2>$null | Out-String).Trim()
+    }
+    $top = $cachedTop
+    $acc = $cachedAcc
     $appPid = (& $Adb -s $Serial shell "pidof com.autoskip.ad" 2>$null | Out-String).Trim()
 
     $logTail = @()
-    if (Test-Path $logFile) { $logTail = Get-Content $logFile -Tail 120 }
+    if (Test-Path $logFile) { $logTail = Get-Content $logFile -Tail 120 -Encoding UTF8 }
     $logText = ($logTail -join "`n")
 
     foreach ($line in $logTail) {
@@ -101,6 +123,14 @@ while ((Get-Date) -lt $deadline) {
         if ($line -match '\[上滑\]') {
             $t = Parse-LogTime $line
             if ($t) { $lastSwipeAt = $t }
+        }
+        if ($line -match '\[OCR\] 命中') {
+            $t = Parse-LogTime $line
+            if ($t -and $t -gt $lastOcrHitAt) { $lastOcrHitAt = $t }
+        }
+        if ($line -match '误滑|回退到第|检测到集数从|回退过头') {
+            $t = Parse-LogTime $line
+            if ($t -and $t -gt $lastMisfireAt) { $lastMisfireAt = $t }
         }
     }
 
@@ -135,7 +165,14 @@ while ((Get-Date) -lt $deadline) {
         $battery = (& $Adb -s $Serial shell "dumpsys battery | grep -E 'level|temperature'" 2>$null | Out-String).Trim().Replace("`r", "").Replace("`n", " ")
     }
 
-    $pageShort = if ($lastPageLine) { $lastPageLine.Substring([Math]::Max(0, $lastPageLine.Length - 160)) } else { "-" }
+    $hbLine = ($logTail | Select-String '\[心跳\]' | Select-Object -Last 1).Line
+    $pageShort = if ($lastPageLine) {
+        $lastPageLine.Substring([Math]::Max(0, $lastPageLine.Length - 160))
+    } elseif ($hbLine -and $hbLine -match '页面=([^ ]+)') {
+        $matches[1]
+    } else {
+        "-"
+    }
     Write-Status ("top={0} | acc={1} | page={2} | cpu={3}% | pss={4} | battery={5}" -f `
         ($top -replace '.*mResumedActivity: ', ''), ($acc -replace '.*Bound services:', ''), $pageShort, $cpuPct, $pss, $battery)
 
@@ -163,21 +200,31 @@ while ((Get-Date) -lt $deadline) {
         }
     }
 
-    # 3) 误滑 / 回退
-    if ($logText -match '误滑|回退到第|检测到集数从|回退过头') {
-        Write-Alert "episode misfire/correction detected"
+    # 3) 误滑 / 回退:只对新增的那条日志告警,避免旧日志每轮重复报
+    if ($lastMisfireAt -gt $lastAlertedMisfireAt) {
+        $lastAlertedMisfireAt = $lastMisfireAt
+        Write-Alert "episode misfire/correction detected" 120
         if (-not $lastShotAt.ContainsKey("misfire") -or ($now - $lastShotAt["misfire"]).TotalSeconds -ge 60) {
             $lastShotAt["misfire"] = $now
             Take-Shot "misfire"
         }
     }
 
-    # 4) OCR 命中广告词
-    if ($logText -match '\[OCR\] 命中') {
-        Write-Alert "OCR ad hit"
-        if (-not $lastShotAt.ContainsKey("ocrhit") -or ($now - $lastShotAt["ocrhit"]).TotalSeconds -ge 60) {
-            $lastShotAt["ocrhit"] = $now
-            Take-Shot "ocrhit"
+    # 4) OCR 命中广告词:只有"命中后 6 秒内没有上滑"才算卡住,
+    #    正常命中会马上上滑,不再逐条刷告警。
+    if ($lastOcrHitAt -gt $lastAlertedOcrHitAt) {
+        $hitAge = ($now - $lastOcrHitAt).TotalSeconds
+        $swipedAfterHit = $lastSwipeAt -ge $lastOcrHitAt
+        if ($hitAge -ge 6 -and -not $swipedAfterHit) {
+            $lastAlertedOcrHitAt = $lastOcrHitAt
+            Write-Alert "OCR ad hit without swipe" 120
+            if (-not $lastShotAt.ContainsKey("ocrhit") -or ($now - $lastShotAt["ocrhit"]).TotalSeconds -ge 60) {
+                $lastShotAt["ocrhit"] = $now
+                Take-Shot "ocrhit"
+            }
+        } elseif ($swipedAfterHit) {
+            # 命中后已上滑,属于正常流程,只记录不告警
+            $lastAlertedOcrHitAt = $lastOcrHitAt
         }
     }
 
@@ -186,7 +233,7 @@ while ((Get-Date) -lt $deadline) {
         $crashInfo = Get-Item $crashFile
         if ($crashInfo.Length -gt $lastCrashSize) {
             $lastCrashSize = $crashInfo.Length
-            $newCrash = Get-Content $crashFile -Tail 120 -ErrorAction SilentlyContinue
+            $newCrash = Get-Content $crashFile -Tail 120 -Encoding UTF8 -ErrorAction SilentlyContinue
             $ourCrash = $newCrash | Where-Object { $_ -match 'com\.autoskip\.ad|AutoSkip' }
             if (($ourCrash -join "`n") -match 'FATAL EXCEPTION|ANR in|am_anr') {
                 Write-Alert "crash/ANR in crash buffer"
@@ -207,3 +254,4 @@ while ((Get-Date) -lt $deadline) {
 Write-Status "monitor end"
 Stop-Process -Id $logProc.Id -Force -ErrorAction SilentlyContinue
 Stop-Process -Id $crashProc.Id -Force -ErrorAction SilentlyContinue
+
