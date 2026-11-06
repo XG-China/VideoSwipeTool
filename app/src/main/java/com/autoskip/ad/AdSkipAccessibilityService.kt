@@ -8,7 +8,6 @@ import android.os.PowerManager
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import java.util.concurrent.Executor
 
 /**
  * 通用视频广告自动上滑无障碍服务(免 root):
@@ -28,11 +27,13 @@ class AdSkipAccessibilityService : AccessibilityService() {
         const val ACTION_SWIPE_NOW = "com.autoskip.ad.action.SWIPE_NOW"
 
         private const val OCR_RETRY_MS = 1_000L           // 广告页两次识字尝试的最小间隔
+        private const val OCR_EVENT_MS = 3_000L           // 新窗口事件后的快速识字间隔
         private const val OCR_WAIT_MS = 2_500L            // 首次进广告页等识字结果的最长时间
-        private const val OCR_WATCHDOG_MS = 4_000L        // 剧集页/首页兜底识字间隔
+        private const val OCR_WATCHDOG_MS = 8_000L        // 剧集/首页兜底识字间隔(直播广告不产生事件)
         private const val OCR_FORCE_MS = 3_000L           // 命中广告词后强制判广告页的时长
-        private const val OCR_MAX_WIDTH = 720             // 广告页识别宽度
-        private const val OCR_WATCHDOG_WIDTH = 480        // 兜底识别宽度(只认大号文字,更快)
+        private const val OCR_NO_ROOT_MS = 5_000L         // 无障碍读不到窗口时,纯 OCR 兜底间隔
+        private const val OCR_MAX_WIDTH = 480             // 广告页识别宽度
+        private const val OCR_WATCHDOG_WIDTH = 360        // 兜底识别宽度(只认大号文字,更快)
     }
 
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -42,6 +43,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var quietUntil = 0L       // 上滑后的安静期
     private var prevAdContext = false // 上一帧判定是否成立(上升沿判断)
     private var lastScanAt = 0L
+    private var lastRootRefreshAt = 0L
     private var lastBallRetryAt = 0L
     private var lastBallMissingLogAt = 0L
     private var lastAdClearAt = 0L    // 判定开始持续消失的时刻
@@ -81,7 +83,10 @@ class AdSkipAccessibilityService : AccessibilityService() {
 
     // ---------- 全屏识字(OCR) ----------
     private val ocr = OcrHelper()
-    private val ocrExecutor = Executor { handler.post(it) }
+    // 截图回调和缩放放到独立线程,避免拖慢 1 秒扫描和主线程
+    private val ocrExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "autoskip-ocr").apply { isDaemon = true }
+    }
     private var ocrBusy = false
     private var lastOcrAt = 0L
     private var ocrForcedAdUntil = 0L              // OCR 命中广告词后的强制广告页截止时刻
@@ -90,12 +95,17 @@ class AdSkipAccessibilityService : AccessibilityService() {
     private var ocrStartedAt = 0L                   // 本次识字开始时刻(用于丢弃滑走后的迟到结果)
     private var ocrWaitUntil = 0L                   // 首次进广告页时等待识字结果的截止时刻
     private var ocrEpisodeUntil = 0L                // OCR 看到「选集」时暂缓上滑的截止时刻
+    private var ocrRequestedAt = 0L                 // 收到窗口/滚动/子树变化后请求尽快识字
+    private var cachedTargets: Set<String> = emptySet() // 缓存目标包,避免高频内容事件里反复读 SharedPreferences
     private var lastClassifiedPage: PageKind? = null // 最近一次无障碍分类结果,用于丢弃过期的 OCR 结果
     private var weakAdEpisodeSince = 0L              // 剧集页命中「返回」但读不到集数标题的起始时刻
+    private var episodeHeaderMissingSince = 0L       // 剧集页读不到「第N集」标题的起始时刻
     private var lastOcrLogAt = 0L
     private var lastOcrFailLogAt = 0L
     private var lastOcrTimeoutLogAt = 0L
     private var lastHeartbeatAt = 0L
+    private var rootNullSince = 0L
+    private var lastRootNullHintAt = 0L
 
     /** 读取当前时序设置(修改后立即生效)。 */
     private fun t(timing: Timing): Long = AppSettings.timing(this, timing)
@@ -116,7 +126,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val now = System.currentTimeMillis()
         if (now - lastHeartbeatAt < 20_000L) return
         lastHeartbeatAt = now
-        val pkg = 当前包名().ifEmpty { lastForegroundPkg }.ifEmpty { "?" }
+        val realPkg = 当前包名()
+        val pkg = realPkg.ifEmpty { lastForegroundPkg }.ifEmpty { "?" }
         val page = lastClassifiedPage?.let { 页面名称(it) } ?: "?"
         LogBuf.add(
             "[心跳] 窗口=$pkg 页面=$page OCR忙=$ocrBusy " +
@@ -124,12 +135,26 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 "冷却=${if (now < quietUntil) "是" else "否"} " +
                 "暂停=${if (now < resumeScanAt) "是" else "否"}"
         )
+        // 系统把无障碍服务标记为 Crashed 后,rootInActiveWindow 会一直是 null,
+        // windows 列表也拿不到目标窗口。这种状态 App 自己恢复不了,必须提示用户重新开关无障碍。
+        if (realPkg.isEmpty() && powerManager.isInteractive) {
+            if (rootNullSince == 0L) rootNullSince = now
+            if (now - rootNullSince >= 20_000L && now - lastRootNullHintAt >= 60_000L) {
+                lastRootNullHintAt = now
+                LogBuf.add("[自检] 连续 20 秒拿不到活动窗口:无障碍服务可能被系统标记异常,请到系统设置关闭再打开无障碍服务")
+                AdHintOverlay.show(this, "无障碍异常:请重新开关无障碍服务")
+            }
+        } else {
+            rootNullSince = 0L
+        }
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         destroyed = false
+        LogBuf.attachFile(this)
         AppSettings.migrateConfig(this) // 清掉历史目标应用,默认由用户重新选择
+        cachedTargets = AppSettings.targetPackages(this)
         // 启动保活前台服务,防止 MIUI 冻结进程导致断连
         GuardService.start(this)
         // 注册手动上滑指令(验证手势链路 + 通知栏按钮用)
@@ -196,15 +221,22 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val ev = event ?: return
         val pkg = ev.packageName?.toString() ?: return
         if (pkg.startsWith("com.autoskip")) return // 不对自己 App 做动作
-        // 内容变化事件只用来刷新无障碍树,不做全量处理;真正的判定交给 800ms 定时扫描
+        val now = System.currentTimeMillis()
+        // 内容变化事件太频繁(字幕/进度/动画),逐条处理会发烫;
+        // 只保留窗口切换和滚动作为"尽快识字"的触发,普通内容变化交给 1 秒扫描。
         if (ev.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return
         // 记录前台包名,作为 rootInActiveWindow 短暂为 null 时的兜底
         if (ev.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             lastForegroundPkg = pkg
+            cachedTargets = AppSettings.targetPackages(this)
         }
         // 现在服务接收所有 App 的事件,这里只处理已开启的目标应用
-        if (pkg !in AppSettings.targetPackages(this)) return
-        val now = System.currentTimeMillis()
+        if (pkg !in cachedTargets) return
+        // 新窗口(通常就是广告遮罩) → 下一轮扫描尽快识字。
+        // 不把每次滚动都当识字触发:视频播放/自动翻页会产生大量滚动事件,容易发烫。
+        if (ev.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            ocrRequestedAt = now
+        }
         // 悬浮球自愈:初次连接若悬浮窗权限未授,补授权后自动重挂
         自愈悬浮球(now)
         if (!可以动手()) return
@@ -291,8 +323,12 @@ class AdSkipAccessibilityService : AccessibilityService() {
 
     /** 用三组关键词扫描当前页面。 */
     private fun 扫描页面(root: AccessibilityNodeInfo): AdScan {
-        // 广告是 Surface/Canvas 渲染时,root 可能是旧缓存;主动 refresh 一次再遍历
-        runCatching { root.refresh() }
+        // refresh 是跨进程调用,每秒一次会明显耗电;每 2 秒最多刷一次即可
+        val now = System.currentTimeMillis()
+        if (now - lastRootRefreshAt >= 2_000L) {
+            lastRootRefreshAt = now
+            runCatching { root.refresh() }
+        }
         return AdDetector.scan(
             root,
             AppSettings.episodeKeywords(this),
@@ -307,15 +343,26 @@ class AdSkipAccessibilityService : AccessibilityService() {
      * @param waitForResult true: 广告页首次确认,最多等 [OCR_WAIT_MS];
      *                      false: 剧集页/首页兜底巡检,不阻塞扫描
      */
-    private fun 尝试Ocr(now: Long, page: PageKind, waitForResult: Boolean) {
+    private fun 尝试Ocr(
+        now: Long,
+        page: PageKind,
+        waitForResult: Boolean,
+        urgent: Boolean = false,
+        minIntervalMs: Long? = null
+    ) {
         if (!AppSettings.ocrEnabled(this)) return
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         if (waitForResult && ocrCheckedForCurrentAd) return
         if (ocrBusy) return
-        val minInterval = if (waitForResult) OCR_RETRY_MS else OCR_WATCHDOG_MS
+        val minInterval = minIntervalMs ?: when {
+            waitForResult -> OCR_RETRY_MS
+            urgent -> OCR_EVENT_MS
+            else -> OCR_WATCHDOG_MS
+        }
         if (now - lastOcrAt < minInterval) return
         lastOcrAt = now
         ocrStartedAt = now
+        ocrRequestedAt = 0L
         if (waitForResult) ocrWaitUntil = now + OCR_WAIT_MS
         ocrBusy = true
         val maxWidth = if (waitForResult) OCR_MAX_WIDTH else OCR_WATCHDOG_WIDTH
@@ -379,10 +426,13 @@ class AdSkipAccessibilityService : AccessibilityService() {
 
     /** 一次识字结束:广告页确认路径要恢复扫描;兜底巡检只释放忙标记。 */
     private fun finishOcr(waitForResult: Boolean) {
-        ocrBusy = false
-        if (waitForResult) {
-            ocrCheckedForCurrentAd = true
-            handler.postDelayed({ 执行扫描() }, 150L)
+        // 截图回调可能在 OCR 线程,统一回主线程改状态
+        handler.post {
+            ocrBusy = false
+            if (waitForResult) {
+                ocrCheckedForCurrentAd = true
+                handler.postDelayed({ 执行扫描() }, 150L)
+            }
         }
     }
 
@@ -419,17 +469,27 @@ class AdSkipAccessibilityService : AccessibilityService() {
         // OCR 偶尔会很慢;超过 10 秒的结果不再可信
         if (now - ocrStartedAt > 10_000L) return
         val lines = result.lines
-        if (lines.isEmpty()) return
-        val joined = lines.joinToString(" ")
+        val cost = now - ocrStartedAt
+        if (lines.isEmpty()) {
+            if (now - lastOcrLogAt >= 15_000L) {
+                lastOcrLogAt = now
+                LogBuf.add("[OCR] 空结果(耗时=${cost}ms),本轮跳过")
+            }
+            return
+        }
+        // 行间用空串拼接:OCR 可能把一个词组拆成多行,不能加空格
+        val joined = lines.joinToString("")
+        val sample = lines.joinToString("|")
         val adKeywords = AppSettings.adKeywords(this)
         val strongWords = adKeywords.filter {
             it != "返回" && it != "直播中" && it != "直播间"
         }
-        val strongHit = strongWords.firstOrNull { joined.contains(it, ignoreCase = true) }
-        val sawEpisode = joined.contains("选集")
-        val sawLive = joined.contains("直播中") || joined.contains("直播间")
-        val sawBack = joined.contains("返回")
-        val topBack = result.topLines.any { it.contains("返回") }
+        val strongHit = strongWords.firstOrNull { OcrMatcher.matches(joined, it) }
+        val sawEpisode = OcrMatcher.matches(joined, "选集")
+        val sawLive = OcrMatcher.matches(joined, "直播中") ||
+            OcrMatcher.matches(joined, "直播间")
+        val sawBack = OcrMatcher.matches(joined, "返回")
+        val topBack = result.topLines.any { OcrMatcher.matches(it, "返回") }
 
         val hit: String? = when {
             // 广告专属文案(上滑继续看短剧/点击进入直播间)最强,任何时候都认
@@ -437,7 +497,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
             // 已判定广告页:整屏的「返回」「直播中」都能用
             page == PageKind.AD && sawBack -> "返回"
             page == PageKind.AD && sawLive ->
-                if (joined.contains("直播中")) "直播中" else "直播间"
+                if (OcrMatcher.matches(joined, "直播中")) "直播中" else "直播间"
             // 树说剧集页,但屏幕出现了「返回」文字 → 多半是广告遮罩。
             // 红果正常剧集页左上角是返回图标(没有文字),OCR 读不到「返回」两个字。
             // 首页不做这个覆盖,避免把首页卡片里的「返回」误当成广告。
@@ -448,12 +508,12 @@ class AdSkipAccessibilityService : AccessibilityService() {
         if (hit == null) {
             if (page == PageKind.AD && sawEpisode) {
                 ocrEpisodeUntil = now + OCR_FORCE_MS
-                LogBuf.add("[OCR] 看到「选集」,判定为剧集页,暂缓上滑")
+                LogBuf.add("[OCR] 看到「选集」,判定为剧集页,暂缓上滑(耗时=${cost}ms)")
             } else if (now - lastOcrLogAt >= 15_000L) {
                 lastOcrLogAt = now
                 LogBuf.add(
-                    "[OCR] 未命中广告词(${页面名称(page)}) | " +
-                        "文字=${lines.take(8).joinToString("|").take(160)}"
+                    "[OCR] 未命中广告词(${页面名称(page)}) 耗时=${cost}ms | " +
+                        "文字=${sample.take(180)}"
                 )
             }
             return
@@ -463,7 +523,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         ocrHitKeyword = hit
         LogBuf.add(
             "[OCR] 命中「$hit」→ 强制判定广告页 ${OCR_FORCE_MS / 1000}s " +
-                "(${页面名称(page)}) | 文字=${lines.take(6).joinToString("|").take(120)}"
+                "(${页面名称(page)}) 耗时=${cost}ms | 文字=${sample.take(140)}"
         )
         // 强制判定立即生效:清零扫描节流时间再补一次
         lastScanAt = 0L
@@ -478,6 +538,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
 
     /** 页面分类的日志标签。 */
     private fun 页面标签(scan: AdScan): String = when {
+        scan.adViewHit != null -> "广告页(遮罩「${scan.adViewHit}」)"
         scan.adStrongVisible -> "广告页(命中「${scan.adHit}」)"
         scan.episodeKeywordVisible -> "剧集页(命中「${scan.episodeHit}」)"
         scan.homeKeywordVisible -> "首页(命中「${scan.homeHit}」)"
@@ -512,7 +573,33 @@ class AdSkipAccessibilityService : AccessibilityService() {
         if (now - lastScanAt < AppSettings.scanIntervalMs(this)) return
         lastScanAt = now
 
-        val root = 当前根节点() ?: return
+        val root = 当前根节点()
+        if (root == null) {
+            // 有些 App/模拟器会完全屏蔽无障碍窗口(焦点正常,但 root 永远为 null)。
+            // 这时用纯 OCR 兜底:看得懂广告词就滑,看不懂就不动。
+            if (lastForegroundPkg in AppSettings.targetPackages(this)) {
+                if (now < ocrForcedAdUntil) {
+                    val canSwipe = now >= readyAt && now >= quietUntil &&
+                        now - lastSwipeAt >= t(Timing.SWIPE_COOLDOWN)
+                    if (canSwipe) {
+                        val keyword = ocrHitKeyword
+                        LogBuf.add("无障碍窗口为空,OCR 命中「$keyword」→ 上滑")
+                        swipeUpOnce(
+                            "OCR 命中「$keyword」",
+                            lastKnownEpisode,
+                            hitKeyword = keyword
+                        )
+                    }
+                } else {
+                    尝试Ocr(
+                        now, PageKind.AD,
+                        waitForResult = false,
+                        minIntervalMs = OCR_NO_ROOT_MS
+                    )
+                }
+            }
+            return
+        }
         val pkg = root.packageName?.toString().orEmpty()
         // 窗口已经切走(如通知栏/系统弹窗)时绝不动手
         if (pkg.isNotEmpty() && pkg !in AppSettings.targetPackages(this)) return
@@ -535,6 +622,15 @@ class AdSkipAccessibilityService : AccessibilityService() {
         }
         val weakAdConfirmed = weakAdOnEpisode && now - weakAdEpisodeSince >= 1500L
 
+        // 剧集标题短暂读不到(换页动画)不算,持续 1.5 秒读不到才值得识字
+        val headerMissing = page == PageKind.EPISODE && scan.episodeHeader == null
+        if (headerMissing) {
+            if (episodeHeaderMissingSince == 0L) episodeHeaderMissingSince = now
+        } else {
+            episodeHeaderMissingSince = 0L
+        }
+        val headerMissingConfirmed = headerMissing && now - episodeHeaderMissingSince >= 1500L
+
         val forcedByOcr = now < ocrForcedAdUntil
         if (!forcedByOcr) ocrHitKeyword = null
         // 无障碍树既没有强广告词、也没有「返回」时,先让全屏识字看一帧再决定
@@ -542,9 +638,20 @@ class AdSkipAccessibilityService : AccessibilityService() {
         if (!forcedByOcr && needOcrConfirm) {
             尝试Ocr(now, page, waitForResult = true)
         } else if (!forcedByOcr && !weakAdConfirmed && page != PageKind.AD) {
-            // 剧集页/首页也巡检:树可能还停在旧页面,整屏识字能发现盖在上面的广告。
-            // 不等待"用户翻页守卫":用户刚滑到广告时,也应该尽快识别。
-            尝试Ocr(now, page, waitForResult = false)
+            // 只在"值得识字"时巡检,避免正常剧集页持续 OCR 发烫:
+            //  - 首页:没有剧集标题,按低频巡检
+            //  - 剧集页:只有读不到「第N集」标题,或树里出现「返回」时才巡检
+            //  - 有窗口/滚动/子树变化事件时:立即快速识字
+            val urgent = ocrRequestedAt > 0L
+            // 剧集页/首页也做低频 OCR 巡检:
+            // 直播广告是盖在播放页上的 Surface,不会产生窗口事件,
+            // 树也可能一直停在剧集页;不巡检就会像这次一样一直不滑。
+            // 8 秒一次,命中广告词立即上滑;正常剧集页 OCR 只读到「选集」不会动作。
+            val worthOcr = page == PageKind.EPISODE || page == PageKind.HOME ||
+                urgent || scan.adKeywordVisible || headerMissingConfirmed
+            if (worthOcr) {
+                尝试Ocr(now, page, waitForResult = false, urgent = urgent)
+            }
         }
         val effectivePage = if (forcedByOcr || weakAdConfirmed) PageKind.AD else page
 
@@ -561,8 +668,10 @@ class AdSkipAccessibilityService : AccessibilityService() {
                 "[页面] $pageLabel | " +
                     "剧集=${scan.episodeHit ?: "-"} " +
                     "首页=${scan.homeHit ?: "-"} 广告=${scan.adHit ?: "-"} " +
+                    "遮罩=${scan.adViewHit ?: "-"} " +
                     "集数=${scan.episodeHeader ?: "-"} 文字=${scan.textCount} " +
-                    "示例=${scan.textSample.joinToString("|").take(400)}"
+                    "示例=${scan.textSample.joinToString("|").take(300)} " +
+                    "视图=${scan.viewSample.joinToString("|").take(400)}"
             )
         }
 
@@ -649,6 +758,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
                     val reason = when {
                         forcedByOcr -> "OCR 命中推荐广告词「${ocrHitKeyword}」"
                         weakAdConfirmed -> "剧集页无集数标题且命中「${scan.adHit}」"
+                        scan.adViewHit != null -> "命中广告遮罩「${scan.adViewHit}」"
                         scan.adStrongVisible -> "命中广告关键词「${scan.adHit}」"
                         scan.adKeywordVisible -> "仅命中弱广告关键词「${scan.adHit}」"
                         else -> "未命中剧集/首页/广告关键词"
@@ -663,7 +773,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
                         swipeUpOnce(
                             "$reason,自动上滑",
                             lastKnownEpisode,
-                            hitKeyword = if (forcedByOcr) ocrHitKeyword else scan.adHit
+                            hitKeyword = if (forcedByOcr) ocrHitKeyword else (scan.adViewHit ?: scan.adHit)
                         )
                     }
                 } else if (now - lastStuckLogAt >= t(Timing.AD_STUCK_LOG)) {
@@ -1186,6 +1296,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
             receiverRegistered = false
         }
         runCatching { ocr.close() }
+        runCatching { ocrExecutor.shutdownNow() }
         ToggleBall.hide(this)
         AdHintOverlay.hide(this)
         GuardService.stop(this)

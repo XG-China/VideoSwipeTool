@@ -37,9 +37,11 @@ data class AdScan(
     val episodeHit: String? = null,
     val homeHit: String? = null,
     val adHit: String? = null,
+    val adViewHit: String? = null,
     val episodeHeader: String? = null,
     val countdownSeconds: Int? = null,
-    val textSample: List<String> = emptyList()
+    val textSample: List<String> = emptyList(),
+    val viewSample: List<String> = emptyList()
 )
 
 /**
@@ -56,6 +58,20 @@ data class AdScan(
 object AdDetector {
 
     private const val MAX_NODES = 800
+
+    /**
+     * 广告遮罩的 class / view-id 标记。
+     * 红果 7.x 使用字节广告 SDK(com.bytedance.android.ad)以及自己的
+     * com.dragon.read.ad.seriestopview;这些 id/class 只在广告层出现,
+     * 比单纯靠文字更可靠。
+     */
+    private val AD_VIEW_MARKERS = listOf(
+        "seriestopview", "openingscreenad", "splashad", "adwebview", "adplayable",
+        "openadsdk", "pangle", "tt_ad", "tt_video_ad", "tt_splash",
+        "tt_full_screen", "tt_interstitial", "tt_reward", "tt_app_open",
+        "advert", "nativead", "bannerad", "rewardad", "interstitial",
+        "skipad", "ad_skip", "ad_close", "ad_back", "ad_sdk"
+    )
 
     /** 集数标题:第1集、第16集、第1000集……(N 为任意数字)。 */
     private val EPISODE_HEADER = Regex("""第(\d+)集""")
@@ -91,6 +107,8 @@ object AdDetector {
         var countdownSeconds: Int? = null
         val allTexts = LinkedHashSet<String>()
         val sampleTexts = ArrayList<String>(16)
+        val viewSamples = ArrayList<String>(16)
+        var adViewHit: String? = null
         var visited = 0
 
         // 顶部区域的判定基准(用根节点 bounds,避免把状态栏算进去)
@@ -107,13 +125,29 @@ object AdDetector {
             val text = node.text?.toString()?.trim().orEmpty()
             val desc = node.contentDescription?.toString()?.trim().orEmpty()
             val full = (text + " " + desc).trim()
+            val visible = node.isVisibleToUser
+
+            // 采集可见节点的 class / view-id,用于识别广告遮罩(不依赖文字)
+            if (visible) {
+                val cls = node.className?.toString().orEmpty()
+                val vid = node.viewIdResourceName.orEmpty()
+                if (cls.isNotEmpty() || vid.isNotEmpty()) {
+                    val key = (cls.substringAfterLast('.') + "#" + vid.substringAfterLast('/')).trim('#')
+                    if (adViewHit == null && isAdLikeView(cls, vid)) adViewHit = key
+                    if (viewSamples.size < 15 &&
+                        (isAdLikeView(cls, vid) || isInterestingView(cls, vid))
+                    ) {
+                        viewSamples += key
+                    }
+                }
+            }
 
             if (full.isNotEmpty()) {
                 allTexts += full
-                if (node.isVisibleToUser && sampleTexts.size < 15) {
+                if (visible && sampleTexts.size < 15) {
                     sampleTexts += full.take(40)
                 }
-                if (node.isVisibleToUser) {
+                if (visible) {
                     for (kw in episodeKeywords) {
                         if (matchesKeyword(full, kw)) {
                             episodeHits += kw
@@ -161,15 +195,19 @@ object AdDetector {
             episodeKeywordVisible = episodeStrongVisible || episodeHeader != null,
             homeKeywordVisible = homeHits.isNotEmpty(),
             adKeywordVisible = adHits.isNotEmpty(),
-            // 命中顺序按用户配置的关键词顺序,取第一个命中的词做日志/展示
-            adStrongVisible = adKeywords.any { it.trim() != "返回" && it in adHits },
+            // 命中顺序按用户配置的关键词顺序,取第一个命中的词做日志/展示。
+            // 广告遮罩的 view-id/class 也是强信号,比只靠文字更可靠。
+            adStrongVisible = adViewHit != null ||
+                adKeywords.any { it.trim() != "返回" && it in adHits },
             textCount = allTexts.size,
             episodeHit = firstMatched(episodeKeywords, episodeHits),
             homeHit = firstMatched(homeKeywords, homeHits),
             adHit = firstMatched(adKeywords, adHits),
+            adViewHit = adViewHit,
             episodeHeader = episodeHeader ?: episodeFallback,
             countdownSeconds = countdownSeconds,
-            textSample = sampleTexts
+            textSample = sampleTexts,
+            viewSample = viewSamples
         )
     }
 
@@ -189,6 +227,24 @@ object AdDetector {
         if (keyword.isBlank()) return false
         if (isEpisodePatternKeyword(keyword)) return EPISODE_HEADER.containsMatchIn(text)
         return text.contains(keyword, ignoreCase = true)
+    }
+
+    /** class / view-id 是否像广告遮罩(红果/抖音的字节广告 SDK)。 */
+    fun isAdLikeView(className: String?, viewId: String?): Boolean {
+        val s = (className.orEmpty() + " " + viewId.orEmpty()).lowercase()
+        if (s.isBlank()) return false
+        return AD_VIEW_MARKERS.any { s.contains(it) }
+    }
+
+    /** 是否值得写进日志采样(播放器/遮罩/按钮等)。 */
+    fun isInterestingView(className: String?, viewId: String?): Boolean {
+        val s = (className.orEmpty() + " " + viewId.orEmpty()).lowercase()
+        if (s.isBlank()) return false
+        if (isAdLikeView(className, viewId)) return true
+        return listOf(
+            "video", "player", "surface", "texture", "series",
+            "skip", "close", "back", "reward", "splash"
+        ).any { s.contains(it) }
     }
 
     /** 从文本中提取「第X集」;X 为任意数字。没有则返回 null。 */

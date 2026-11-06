@@ -29,3 +29,7 @@ Thumbs.db
 *.aab
 app/release/
 dist/
+
+# Device monitoring / APK analysis
+logs/
+analysis/

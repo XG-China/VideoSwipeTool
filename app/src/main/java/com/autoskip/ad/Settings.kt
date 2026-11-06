@@ -35,7 +35,12 @@ object AppSettings {
         AppInfo("com.hunantv.imgo.activity", "芒果TV"),
         AppInfo("com.xingin.xhs", "小红书"),
         AppInfo("com.sina.weibo", "微博"),
-    )
+    ) + if (BuildConfig.DEBUG) {
+        // 仅调试包:用 TestCanvas 的 Canvas 页面做 OCR/上滑测试,正式版不会出现
+        listOf(AppInfo("com.autoskip.testcanvas", "TestCanvas(调试)"))
+    } else {
+        emptyList()
+    }
 
     private val DEFAULT_TARGETS = emptySet<String>()
 

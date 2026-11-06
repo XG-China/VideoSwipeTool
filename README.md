@@ -91,11 +91,35 @@
 4. 识别到「选集」→ 判定更像剧集页,这一轮暂缓上滑
 5. 识别超时或失败 → 按原来的「空关键词按广告页」逻辑继续,不会卡住
 
-**树停在旧页面怎么办**:红果有时广告已经盖在屏幕上,无障碍树还停在剧集页(「选集」仍可见),
-这时会每 8 秒低速巡检一次;如果屏幕上出现「返回」**文字**就按广告遮罩处理
+**树停在旧页面怎么办**:红果的直播广告是盖在剧集页上的 Surface,不会产生窗口事件,
+无障碍树会一直停在剧集页(「选集」仍可见)。所以剧集页/首页也会做 **8 秒一次的低频 OCR 巡检**,
+不再只等树里出现「返回」;命中广告词就上滑,正常剧集页只读到「选集」不会动作。
+
+如果屏幕上出现「返回」**文字**,就按广告遮罩处理
 (正常剧集页左上角是返回图标,OCR 读不到「返回」两个字)。首页不做这个覆盖。
 
-每轮广告只识别一次;识别结果还会校验页面是否已经变化,过期结果直接丢弃。
+**广告遮罩识别**:扫描 UI 树时同时采集可见节点的 `class / view-id`,命中字节广告 SDK
+或红果自己的遮罩(`seriestopview`、`openingscreenad`、`adwebview`、`adplayable`、
+`openadsdk`、`pangle`、`tt_ad`、`tt_splash` 等)就直接按广告页处理。
+页面日志会打印 `遮罩=` 和 `视图=`。
+
+**命中率**:OCR 文本先去掉空白和标点,长关键词允许 1–2 个识别错字
+(例如「上滑继续观看短刷」也能命中「上滑继续观看短剧」);多行文字用无空格方式拼接,
+避免关键词被拆行后匹配不到。
+
+**性能**:剧集页/首页 8 秒一次 OCR,有新窗口事件时 3 秒;
+识别宽度 480/360,截图和缩放放在独立线程。真机实测剧集页 CPU 约 10%(单核),
+每次 OCR 约 0.3–1.1 秒;不需要 OCR 时可在「规则设置」关闭。
+
+**持久日志**:运行日志同时写入 `filesDir/logs/autoskip.log`,
+超过 2MB 轮转为 `autoskip.log.1`,只保留两份;内存保留 1000 行。
+「导出运行日志」会优先附带持久化文件的最近 2000 行,进程被杀前的记录也能看到。
+
+**无障碍窗口完全为空怎么办**:有些 App/模拟器会屏蔽无障碍窗口(焦点正常,但 root 一直是 null)。
+这时只要前台是目标 App,就每 5 秒做一次纯 OCR 兜底;命中广告词直接上滑,
+不再依赖无障碍树。红果在 Android 11 ARM 翻译模拟器上就是这种状态,已验证 OCR 能读到画面。
+
+识别结果还会校验页面是否已经变化,过期结果直接丢弃。
 可在「规则设置」里关闭。OCR 只在本地内存处理,不保存、不上传。
 
 > 注意:首页/搜索页如果没命中首页关键词,也会按广告页触发一次上滑。
@@ -253,8 +277,10 @@ app/src/main/java/com/autoskip/ad/
 ├── ActionReceiver.kt               通知栏按钮的广播落点
 ├── LogExporter.kt                  日志导出为文本并经 FileProvider 分享
 ├── Settings.kt                     AppSettings:开关/目标包/关键词/间隔/回退/统计
-├── LogBuf.kt                       300 条内存环形日志,镜像 logcat
+├── LogBuf.kt                       1000 条内存日志 + 2MB 轮转持久化文件,镜像 logcat
 └── MainActivity.kt                 Compose 单页界面(状态/用法/规则设置/日志)
+
+tools/monitor-phone.ps1             真机 24 小时监控:抓 logcat、定时截屏、检测卡广告/误滑/异常
 
 app/src/test/java/com/autoskip/ad/
 ├── AdRuleTest.kt                   页面分类优先级回归
@@ -262,14 +288,14 @@ app/src/test/java/com/autoskip/ad/
 └── SettingsParseTest.kt            关键词/集数/倒计时/命中顺序回归
 
 app/src/main/res/xml/accessibility_service_config.xml
-    accessibilityEventTypes = typeWindowStateChanged | typeWindowContentChanged | typeViewScrolled
+    accessibilityEventTypes = typeWindowStateChanged | typeViewScrolled
     accessibilityFlags       = flagDefault | flagReportViewIds | flagRetrieveInteractiveWindows | flagIncludeNotImportantViews
     canPerformGestures        = true
     canRetrieveWindowContent  = true
     canTakeScreenshot         = true
     notificationTimeout       = 800ms
     (不限定 packageNames,服务接收所有 App 事件,在代码里按目标应用集合过滤)
-    (typeWindowContentChanged 只用于刷新无障碍树,真正的判定交给 1 秒定时扫描)
+    (不订阅高频 typeWindowContentChanged;判定交给 1 秒定时扫描,省电)
 
 app/src/main/res/xml/file_paths.xml          日志导出目录(cache/logs)
 app/src/main/res/layout/bubble_toggle.xml    悬浮球布局
@@ -292,7 +318,7 @@ app/src/main/res/layout/ball_panel_row.xml   面板里的目标应用行(按 KNO
 | Compose BOM | 2024.12.01 |
 | compileSdk / targetSdk | 36(Android 16) |
 | minSdk | 26(Android 8.0) |
-| versionCode / versionName | 158 / 1.6.4 |
+| versionCode / versionName | 160 / 1.6.6 |
 
 > 全屏识字依赖 `com.google.mlkit:text-recognition-chinese:16.0.1`(中文离线模型),
 > APK 体积会比 1.6.2 大约 50MB;只在 Android 11(API 30)及以上启用。
@@ -325,9 +351,9 @@ sdk.dir=C\:\\Android
 
 当前提供两个产物：
 
-- `dist/VideoSwipeTool-1.6.4-release.apk`：正式 keystore 签名，适合对外分发。
+- `dist/VideoSwipeTool-1.6.6-release.apk`：正式 keystore 签名，适合对外分发。
   已安装 debug 签名版的设备必须先卸载才能安装它。
-- `dist/VideoSwipeTool-1.6.4-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
+- `dist/VideoSwipeTool-1.6.6-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
   保留统计和设置；证书显示 `Android Debug`，不适合对外分发。
 
 临时构建 debug 签名版：把 `keystore.properties` 移走后再执行 `assembleRelease` 即可

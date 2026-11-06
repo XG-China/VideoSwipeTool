@@ -25,8 +25,8 @@ android {
         applicationId = "com.autoskip.ad"
         minSdk = 26
         targetSdk = 36
-        versionCode = 158
-        versionName = "1.6.4"
+        versionCode = 160
+        versionName = "1.6.6"
     }
 
     signingConfigs {
@@ -63,6 +63,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     packaging {
         resources {

@@ -49,7 +49,15 @@ object LogExporter {
                     }
                     appendLine("时序: $timings")
                     appendLine("----------------------------------------")
-                    LogBuf.snapshot().forEach { appendLine(it) }
+                    // 优先附上持久化日志(进程被杀前的记录也在)
+                    val persisted = LogBuf.filePath()?.let { File(it) }
+                    if (persisted != null && persisted.exists()) {
+                        appendLine("持久化日志: ${persisted.absolutePath}")
+                        appendLine("---------- 最近 2000 行 ----------")
+                        persisted.readLines().takeLast(2000).forEach { appendLine(it) }
+                    } else {
+                        LogBuf.snapshot().forEach { appendLine(it) }
+                    }
                 }
             )
 

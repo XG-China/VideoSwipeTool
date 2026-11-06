@@ -103,6 +103,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        LogBuf.attachFile(this)
         AppSettings.migrateConfig(this)
         // Android 15+ 强制 edge-to-edge:顶部是红色标题栏,状态栏图标用浅色;
         // 底部是浅色内容区,导航栏图标用深色
