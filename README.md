@@ -5,7 +5,7 @@
 用三组关键词判断当前页面:
 
 - 剧集页(选集 / 第N集)和首页(关注 / 推荐 / 首页)不滑
-- 广告页(返回 / 上滑继续看短剧 / 点击进入直播间)上滑
+- 广告页(返回 / 上滑继续看短剧 / 点击进入直播间 / 直播中)上滑
 - 什么都没命中,也按广告页上滑
 
 默认不开启任何 App;在主界面或悬浮面板里勾选需要自动上滑的视频应用。
@@ -24,12 +24,14 @@
 4. 在主界面的「目标应用」里勾选要自动上滑的 App
 5. 打开该 App 刷视频
 
-> 只对勾选的目标应用生效。**manifest 中没有 INTERNET 权限**,不联网、不 OCR、不上传任何数据。
+> 只对勾选的目标应用生效。**manifest 中没有 INTERNET 权限**,不联网、不上传任何数据。
+> 全屏识字(OCR)用的是随 APK 打包的离线模型,截图只在内存中识别后立即回收,不落盘。
 
 ## 功能
 
 - 自动上滑跳过广告
 - 三组关键词判断页面,剧集页/首页不误滑
+- 无障碍树读不到文字时,用本地 OCR 全屏识字补判广告页(Android 11+)
 - 识别 `5s` / `5秒` / `广告 5` 等倒计时,结束再滑
 - 误滑多跳一集时自动回退
 - 悬浮球 + 通知栏快捷开关
@@ -51,7 +53,7 @@
 |---|---|---|
 | 剧集页 | `选集`、`第N集` | 不滑 |
 | 首页 | `关注`、`推荐`、`首页` | 不滑 |
-| 广告页 | `返回`、`上滑继续看短剧`、`上滑继续观看短剧`、`点击进入直播间` | 上滑 |
+| 广告页 | `返回`、`上滑继续看短剧`、`上滑继续观看短剧`、`点击进入直播间`、`直播中`、`直播间` | 上滑 |
 
 优先级:
 
@@ -77,7 +79,24 @@
 且这几秒内没有用户手动翻页,就判定为误滑 —— 不记成功、立即停止本轮重试、锁定 20 秒
 (回到剧集页时立即解锁)。第一次误滑仍可能发生(手势已经送出),但不会继续叠加到第 4、5 集。
 
-**不做**倒计时文案猜测、不做「广告」标识判断、不做直播/图片类广告结构识别、不点「跳过」按钮。
+**不做**倒计时文案猜测、不做「广告」标识判断、不点「跳过」按钮。直播/图片类广告优先交给下面的全屏识字补充。
+
+### 全屏识字(OCR,Android 11+)
+
+有些直播广告是 Surface/Canvas 渲染的,无障碍树里完全没有文字,只能靠看屏幕:
+
+1. 页面被判定为广告页、但树里既没有强广告词也没有「返回」时,服务截一张屏
+2. 用 ML Kit 中文离线模型识别整屏文字(截图缩放后识别,识别完立即回收)
+3. 识别到广告词(如「点击进入直播间」「直播中」「上滑继续看短剧」「返回」)→ 强制按广告页处理并上滑
+4. 识别到「选集」→ 判定更像剧集页,这一轮暂缓上滑
+5. 识别超时或失败 → 按原来的「空关键词按广告页」逻辑继续,不会卡住
+
+**树停在旧页面怎么办**:红果有时广告已经盖在屏幕上,无障碍树还停在剧集页(「选集」仍可见),
+这时会每 8 秒低速巡检一次;如果屏幕上出现「返回」**文字**就按广告遮罩处理
+(正常剧集页左上角是返回图标,OCR 读不到「返回」两个字)。首页不做这个覆盖。
+
+每轮广告只识别一次;识别结果还会校验页面是否已经变化,过期结果直接丢弃。
+可在「规则设置」里关闭。OCR 只在本地内存处理,不保存、不上传。
 
 > 注意:首页/搜索页如果没命中首页关键词,也会按广告页触发一次上滑。
 > 上升沿逻辑保证同一状态只滑一次,不会在首页连续滑。
@@ -114,7 +133,7 @@ App 会按显示的秒数等待,倒计时结束后再上滑;同一倒计时文�
 
 | 参数 | 默认值 | 作用 |
 |---|---|---|
-| 扫描间隔 | 默认 1s | 可在主界面 300–5000ms 调整,不管有没有广告都按此节奏 |
+| 扫描间隔 | 默认 1s | 可在主界面 1000–5000ms 调整,不管有没有广告都按此节奏 |
 | `READY_BUFFER_MS` | 4s | 服务连接后的缓冲期,期间不自动滑(防止恢复瞬间划走正在看的) |
 | `USER_SCROLL_GUARD_MS` | 3s | 用户手动翻页后的守卫时间 |
 | `SWIPE_COOLDOWN_MS` | 3s | 两次自动上滑的最小间隔 |
@@ -155,7 +174,7 @@ App 会按显示的秒数等待,倒计时结束后再上滑;同一倒计时文�
 
 1. **状态卡** — 无障碍服务 + 悬浮球 + 目标应用三行状态;异常时才追加原因和「去开启」按钮
 2. **用法卡** — 规则一行 + 悬浮球用法一行 + 「打开目标应用」按钮
-3. **规则设置卡** — 剧集/首页/广告三组关键词、扫描间隔、误滑自动回退开关、保存按钮、自动统计与重置
+3. **规则设置卡** — 剧集/首页/广告三组关键词、扫描间隔、误滑自动回退开关、全屏识字开关、保存按钮、自动统计与重置
 4. **目标应用卡** — 勾选需要自动上滑的视频 App,默认一个都不开
 5. **高级时序卡** — 连接缓冲、守卫、冷却、安静期、重试次数等参数,默认折叠
 6. **日志卡** — 默认折叠只显示最新一条,点标题展开全量,可清空/导出
@@ -227,6 +246,7 @@ app/src/main/java/com/autoskip/ad/
 ├── AdRule.kt                       纯判定逻辑(所有关键词可见才不滑),可单元测试
 ├── EpisodeCorrection.kt            误滑换集的纯逻辑(下一集/回退目标),可单元测试
 ├── GestureKit.kt                   dispatchGesture 上滑注入
+├── OcrHelper.kt                    ML Kit 中文离线识字(截图只在内存处理)
 ├── AdHintOverlay.kt                顶部检测提示条(2.5s 自动消失)
 ├── ToggleBall.kt                   悬浮球 + 管理面板(拖动、短按面板、长按开关、自愈重挂)
 ├── GuardService.kt                 前台保活服务(specialUse)+ 通知栏快捷操作
@@ -242,12 +262,14 @@ app/src/test/java/com/autoskip/ad/
 └── SettingsParseTest.kt            关键词/集数/倒计时/命中顺序回归
 
 app/src/main/res/xml/accessibility_service_config.xml
-    accessibilityEventTypes = typeWindowStateChanged | typeViewScrolled
-    accessibilityFlags       = flagDefault | flagReportViewIds | flagRetrieveInteractiveWindows
+    accessibilityEventTypes = typeWindowStateChanged | typeWindowContentChanged | typeViewScrolled
+    accessibilityFlags       = flagDefault | flagReportViewIds | flagRetrieveInteractiveWindows | flagIncludeNotImportantViews
     canPerformGestures        = true
     canRetrieveWindowContent  = true
+    canTakeScreenshot         = true
+    notificationTimeout       = 800ms
     (不限定 packageNames,服务接收所有 App 事件,在代码里按目标应用集合过滤)
-    (不订阅高频 typeWindowContentChanged,UI 内容变化由 1 秒定时扫描覆盖)
+    (typeWindowContentChanged 只用于刷新无障碍树,真正的判定交给 1 秒定时扫描)
 
 app/src/main/res/xml/file_paths.xml          日志导出目录(cache/logs)
 app/src/main/res/layout/bubble_toggle.xml    悬浮球布局
@@ -270,7 +292,10 @@ app/src/main/res/layout/ball_panel_row.xml   面板里的目标应用行(按 KNO
 | Compose BOM | 2024.12.01 |
 | compileSdk / targetSdk | 36(Android 16) |
 | minSdk | 26(Android 8.0) |
-| versionCode / versionName | 156 / 1.6.2 |
+| versionCode / versionName | 157 / 1.6.3 |
+
+> 全屏识字依赖 `com.google.mlkit:text-recognition-chinese:16.0.1`(中文离线模型),
+> APK 体积会比 1.6.2 大约 50MB;只在 Android 11(API 30)及以上启用。
 
 项目自带 Gradle wrapper,无需预装 Gradle:
 
@@ -300,9 +325,9 @@ sdk.dir=C\:\\Android
 
 当前提供两个产物：
 
-- `dist/VideoSwipeTool-1.6.2-release.apk`：正式 keystore 签名，适合对外分发。
+- `dist/VideoSwipeTool-1.6.3-release.apk`：正式 keystore 签名，适合对外分发。
   已安装 debug 签名版的设备必须先卸载才能安装它。
-- `dist/VideoSwipeTool-1.6.2-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
+- `dist/VideoSwipeTool-1.6.3-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
   保留统计和设置；证书显示 `Android Debug`，不适合对外分发。
 
 临时构建 debug 签名版：把 `keystore.properties` 移走后再执行 `assembleRelease` 即可
@@ -386,3 +411,7 @@ $adb = "C:\Android\platform-tools\adb.exe"
 无网络代码,不读写任何账号或用户数据。所有判定都在设备本地完成。
 manifest 中没有任何网络权限(`INTERNET` / `ACCESS_NETWORK_STATE` 都没有),也不申请安装未知应用权限。
 「导出运行日志」只是把本地文本交给系统分享面板,由用户自己选择落点。
+
+全屏识字使用随 APK 打包的 ML Kit 中文离线模型,不需要联网下载。
+截图由无障碍服务的 `takeScreenshot` 获取,只在内存中识别,识别完立即回收,
+不写入文件、不上传;关闭「全屏识字」后完全不会截屏。

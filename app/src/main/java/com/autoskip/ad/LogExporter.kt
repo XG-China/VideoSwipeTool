@@ -40,6 +40,7 @@ object LogExporter {
                     appendLine("首页关键词: ${AppSettings.homeKeywords(ctx).joinToString("/")}")
                     appendLine("广告关键词: ${AppSettings.adKeywords(ctx).joinToString("/")}")
                     appendLine("扫描间隔: ${AppSettings.scanIntervalMs(ctx)} ms")
+                    appendLine("全屏识字: ${AppSettings.ocrEnabled(ctx)} (SDK ${Build.VERSION.SDK_INT})")
                     val timings = Timing.entries.joinToString(" ") { timing ->
                         val value = AppSettings.timing(ctx, timing)
                         val text = if (timing.unit == "s") "%.1f s".format(value / 1000.0)

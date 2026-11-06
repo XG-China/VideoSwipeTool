@@ -38,7 +38,8 @@ data class AdScan(
     val homeHit: String? = null,
     val adHit: String? = null,
     val episodeHeader: String? = null,
-    val countdownSeconds: Int? = null
+    val countdownSeconds: Int? = null,
+    val textSample: List<String> = emptyList()
 )
 
 /**
@@ -54,7 +55,7 @@ data class AdScan(
  */
 object AdDetector {
 
-    private const val MAX_NODES = 2000
+    private const val MAX_NODES = 800
 
     /** 集数标题:第1集、第16集、第1000集……(N 为任意数字)。 */
     private val EPISODE_HEADER = Regex("""第(\d+)集""")
@@ -82,12 +83,14 @@ object AdDetector {
         adKeywords: List<String> = AppSettings.DEFAULT_AD_KEYWORDS
     ): AdScan {
         val episodeHits = HashSet<String>()
+        var episodeStrongVisible = false
         val homeHits = HashSet<String>()
         val adHits = HashSet<String>()
         var episodeHeader: String? = null
         var episodeFallback: String? = null
         var countdownSeconds: Int? = null
         val allTexts = LinkedHashSet<String>()
+        val sampleTexts = ArrayList<String>(16)
         var visited = 0
 
         // 顶部区域的判定基准(用根节点 bounds,避免把状态栏算进去)
@@ -107,9 +110,17 @@ object AdDetector {
 
             if (full.isNotEmpty()) {
                 allTexts += full
+                if (node.isVisibleToUser && sampleTexts.size < 15) {
+                    sampleTexts += full.take(40)
+                }
                 if (node.isVisibleToUser) {
                     for (kw in episodeKeywords) {
-                        if (matchesKeyword(full, kw)) episodeHits += kw
+                        if (matchesKeyword(full, kw)) {
+                            episodeHits += kw
+                            // 「第N集」在首页卡片/推荐里也常见,只有真正的「选集」等普通剧集词
+                            // 或顶部左侧的集数标题才算剧集页;卡片里的集数只用于解析集数。
+                            if (!isEpisodePatternKeyword(kw)) episodeStrongVisible = true
+                        }
                     }
                     for (kw in homeKeywords) {
                         if (matchesKeyword(full, kw)) homeHits += kw
@@ -147,7 +158,7 @@ object AdDetector {
         }
 
         return AdScan(
-            episodeKeywordVisible = episodeHits.isNotEmpty(),
+            episodeKeywordVisible = episodeStrongVisible || episodeHeader != null,
             homeKeywordVisible = homeHits.isNotEmpty(),
             adKeywordVisible = adHits.isNotEmpty(),
             // 命中顺序按用户配置的关键词顺序,取第一个命中的词做日志/展示
@@ -157,7 +168,8 @@ object AdDetector {
             homeHit = firstMatched(homeKeywords, homeHits),
             adHit = firstMatched(adKeywords, adHits),
             episodeHeader = episodeHeader ?: episodeFallback,
-            countdownSeconds = countdownSeconds
+            countdownSeconds = countdownSeconds,
+            textSample = sampleTexts
         )
     }
 

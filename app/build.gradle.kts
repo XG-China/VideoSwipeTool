@@ -25,8 +25,8 @@ android {
         applicationId = "com.autoskip.ad"
         minSdk = 26
         targetSdk = 36
-        versionCode = 156
-        versionName = "1.6.2"
+        versionCode = 157
+        versionName = "1.6.3"
     }
 
     signingConfigs {
@@ -80,5 +80,6 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.ui.tooling.preview)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     testImplementation(libs.junit)
 }

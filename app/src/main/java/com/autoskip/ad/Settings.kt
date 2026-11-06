@@ -41,16 +41,29 @@ object AppSettings {
 
     // 配置版本迁移:清掉历史保存的目标应用,默认一个都不开,由用户重新选择
     private const val PREFS_VERSION_KEY = "prefs_version"
-    private const val PREFS_VERSION = 6
+    private const val PREFS_VERSION = 7
 
     fun migrateConfig(ctx: Context) {
-        val v = sp(ctx).getInt(PREFS_VERSION_KEY, 0)
-        if (v < PREFS_VERSION) {
-            sp(ctx).edit()
-                .remove("target_packages")
-                .putInt(PREFS_VERSION_KEY, PREFS_VERSION)
-                .apply()
+        val sp = sp(ctx)
+        val v = sp.getInt(PREFS_VERSION_KEY, 0)
+        if (v >= PREFS_VERSION) return
+        val edit = sp.edit()
+        if (v < 6) {
+            // 旧版本默认目标应用:清空,由用户重新选择
+            edit.remove("target_packages")
         }
+        if (v < 7) {
+            // 新版本新增的广告词,合并进用户已保存的广告关键词,不覆盖自定义词
+            val saved = sp.getString("ad_keywords", null)
+            if (saved != null) {
+                val merged = parseKeywords(
+                    saved + ",直播中,直播间",
+                    DEFAULT_AD_KEYWORDS
+                ).joinToString(",")
+                edit.putString("ad_keywords", merged)
+            }
+        }
+        edit.putInt(PREFS_VERSION_KEY, PREFS_VERSION).apply()
     }
 
     /** 当前启用的目标包集合;默认一个都不开,由用户在目标应用里选择。 */
@@ -93,7 +106,9 @@ object AppSettings {
         "返回",
         "上滑继续看短剧",
         "上滑继续观看短剧",
-        "点击进入直播间"
+        "点击进入直播间",
+        "直播中",
+        "直播间"
     )
 
     /**
@@ -141,7 +156,7 @@ object AppSettings {
     }
 
     // ---------- 扫描节奏 ----------
-    const val MIN_SCAN_MS = 300L
+    const val MIN_SCAN_MS = 1000L
     const val MAX_SCAN_MS = 5000L
     const val DEFAULT_SCAN_MS = 1000L
 
@@ -165,6 +180,17 @@ object AppSettings {
         Timing.entries.forEach { edit.putLong(it.key, it.default) }
         edit.apply()
     }
+
+    // ---------- 全屏识字(OCR) ----------
+    /**
+     * 无障碍树读不到文字时,截屏用本地 OCR 识别广告词。
+     * 默认开启;仅 Android 11(API 30)及以上可用。
+     */
+    fun ocrEnabled(ctx: Context): Boolean =
+        sp(ctx).getBoolean("ocr_enabled", true)
+
+    fun setOcrEnabled(ctx: Context, v: Boolean) =
+        sp(ctx).edit().putBoolean("ocr_enabled", v).apply()
 
     // ---------- 误滑换集自动回退 ----------
     /**

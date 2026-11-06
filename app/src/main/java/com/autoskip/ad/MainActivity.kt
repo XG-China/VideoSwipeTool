@@ -405,6 +405,7 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
     var intervalMs by remember { mutableStateOf(AppSettings.scanIntervalMs(ctx).toInt()) }
     var savedHint by remember { mutableStateOf("") }
     var autoCorrect by remember { mutableStateOf(AppSettings.autoCorrectEpisode(ctx)) }
+    var ocrOn by remember { mutableStateOf(AppSettings.ocrEnabled(ctx)) }
 
     fun saveAll() {
         AppSettings.setEpisodeKeywords(ctx, episodeKeywords)
@@ -485,6 +486,26 @@ private fun RuleSettingsCard(statsText: String, onStatsReset: () -> Unit) {
                         autoCorrect = it
                         AppSettings.setAutoCorrectEpisode(ctx, it)
                         LogBuf.add("误滑自动回退已${if (it) "开启" else "关闭"}")
+                    }
+                )
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("全屏识字(OCR)", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "无障碍树读不到文字时,截屏用本地 OCR 识别广告词。" +
+                            "仅 Android 11+ 可用;图片只在内存处理,不上传,会增加耗电。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = ocrOn,
+                    onCheckedChange = {
+                        ocrOn = it
+                        AppSettings.setOcrEnabled(ctx, it)
+                        LogBuf.add("全屏识字已${if (it) "开启" else "关闭"}")
                     }
                 )
             }
