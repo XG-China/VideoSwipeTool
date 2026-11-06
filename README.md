@@ -292,7 +292,7 @@ app/src/main/res/layout/ball_panel_row.xml   面板里的目标应用行(按 KNO
 | Compose BOM | 2024.12.01 |
 | compileSdk / targetSdk | 36(Android 16) |
 | minSdk | 26(Android 8.0) |
-| versionCode / versionName | 157 / 1.6.3 |
+| versionCode / versionName | 158 / 1.6.4 |
 
 > 全屏识字依赖 `com.google.mlkit:text-recognition-chinese:16.0.1`(中文离线模型),
 > APK 体积会比 1.6.2 大约 50MB;只在 Android 11(API 30)及以上启用。
@@ -325,9 +325,9 @@ sdk.dir=C\:\\Android
 
 当前提供两个产物：
 
-- `dist/VideoSwipeTool-1.6.3-release.apk`：正式 keystore 签名，适合对外分发。
+- `dist/VideoSwipeTool-1.6.4-release.apk`：正式 keystore 签名，适合对外分发。
   已安装 debug 签名版的设备必须先卸载才能安装它。
-- `dist/VideoSwipeTool-1.6.3-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
+- `dist/VideoSwipeTool-1.6.4-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
   保留统计和设置；证书显示 `Android Debug`，不适合对外分发。
 
 临时构建 debug 签名版：把 `keystore.properties` 移走后再执行 `assembleRelease` 即可
@@ -359,6 +359,14 @@ $adb = "C:\Android\platform-tools\adb.exe"
 ```powershell
 & $adb logcat -s AutoSkip:V
 ```
+
+日志里每 20 秒会有一条 `[心跳]`:
+
+- `窗口=com.phoenix.read`:已经拿到目标应用的根节点
+- `窗口=?`:没有拿到根节点(1.6.4 已增加从 `windows` 列表兜底)
+- `页面=广告页/剧集页/首页`,以及 `OCR忙/锁定/冷却/暂停` 状态
+
+排查"为什么不动"时,先看最近一条心跳和 `[页面]` 日志。
 
 ---
 
