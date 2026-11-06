@@ -166,12 +166,15 @@ while ((Get-Date) -lt $deadline) {
     }
 
     $hbLine = ($logTail | Select-String '\[心跳\]' | Select-Object -Last 1).Line
-    $pageShort = if ($lastPageLine) {
-        $lastPageLine.Substring([Math]::Max(0, $lastPageLine.Length - 160))
+    # 只保留"页面类型 + 集数",不要把整行几百字示例写进 status.log
+    $pageShort = "-"
+    if ($lastPageLine -match '\[页面\]\s*([^|]+)') {
+        $pageShort = $matches[1].Trim()
+        if ($lastPageLine -match '集数=(第\d+集|未知)') {
+            $pageShort = "$pageShort $($matches[1])"
+        }
     } elseif ($hbLine -and $hbLine -match '页面=([^ ]+)') {
-        $matches[1]
-    } else {
-        "-"
+        $pageShort = $matches[1]
     }
     Write-Status ("top={0} | acc={1} | page={2} | cpu={3}% | pss={4} | battery={5}" -f `
         ($top -replace '.*mResumedActivity: ', ''), ($acc -replace '.*Bound services:', ''), $pageShort, $cpuPct, $pss, $battery)
