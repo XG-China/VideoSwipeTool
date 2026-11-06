@@ -27,9 +27,10 @@ class AdSkipAccessibilityService : AccessibilityService() {
         const val ACTION_SWIPE_NOW = "com.autoskip.ad.action.SWIPE_NOW"
 
         private const val OCR_RETRY_MS = 1_000L           // 广告页两次识字尝试的最小间隔
-        private const val OCR_EVENT_MS = 3_000L           // 新窗口事件后的快速识字间隔
+        private const val OCR_EVENT_MS = 1_000L           // 看到广告遮罩/新窗口后的快速识字间隔
         private const val OCR_WAIT_MS = 2_500L            // 首次进广告页等识字结果的最长时间
-        private const val OCR_WATCHDOG_MS = 8_000L        // 剧集/首页兜底识字间隔(直播广告不产生事件)
+        private const val OCR_EPISODE_MS = 3_000L         // 剧集页巡检:广告出现后尽量 3 秒内反应
+        private const val OCR_WATCHDOG_MS = 8_000L        // 首页/其它页面兜底识字间隔
         private const val OCR_FORCE_MS = 3_000L           // 命中广告词后强制判广告页的时长
         private const val OCR_NO_ROOT_MS = 5_000L         // 无障碍读不到窗口时,纯 OCR 兜底间隔
         private const val OCR_MAX_WIDTH = 480             // 广告页识别宽度
@@ -357,6 +358,7 @@ class AdSkipAccessibilityService : AccessibilityService() {
         val minInterval = minIntervalMs ?: when {
             waitForResult -> OCR_RETRY_MS
             urgent -> OCR_EVENT_MS
+            page == PageKind.EPISODE -> OCR_EPISODE_MS
             else -> OCR_WATCHDOG_MS
         }
         if (now - lastOcrAt < minInterval) return
@@ -519,6 +521,15 @@ class AdSkipAccessibilityService : AccessibilityService() {
             return
         }
 
+        // 广告强信号优先:取消正在进行的集数回退/误滑锁定,
+        // 并把 prevAdContext 复位,保证这次一定能重新触发上滑。
+        if (correctionTarget != null) {
+            cancelCorrection("[OCR] 命中「$hit」,取消集数回退")
+        } else {
+            overshootLockUntil = 0L
+            postCorrectionUntil = 0L
+            prevAdContext = false
+        }
         ocrForcedAdUntil = now + OCR_FORCE_MS
         ocrHitKeyword = hit
         LogBuf.add(
@@ -631,6 +642,18 @@ class AdSkipAccessibilityService : AccessibilityService() {
         }
         val headerMissingConfirmed = headerMissing && now - episodeHeaderMissingSince >= 1500L
 
+        // 广告遮罩 view 一出现就立即触发 OCR,不用等 8 秒巡检。
+        // 红果直播广告会出现 ttlive_player_render_view;正常剧集页没有这个 view。
+        if (scan.adViewHit != null || scan.viewSample.any { v ->
+                val s = v.lowercase()
+                s.contains("ttlive") || s.contains("seriestop") ||
+                    s.contains("adweb") || s.contains("playable") ||
+                    s.contains("openadsdk") || s.contains("pangle")
+            }
+        ) {
+            ocrRequestedAt = now
+        }
+
         val forcedByOcr = now < ocrForcedAdUntil
         if (!forcedByOcr) ocrHitKeyword = null
         // 无障碍树既没有强广告词、也没有「返回」时,先让全屏识字看一帧再决定
@@ -678,7 +701,8 @@ class AdSkipAccessibilityService : AccessibilityService() {
         // 强广告证据(OCR 命中/树里读到强广告词)优先于"用户刚翻页"守卫:
         // 广告自己也可能产生滚动事件,不能因此把已经确认的广告永远挡在守卫期外。
         val userScrollBlocked = now - lastUserScrollAt < t(Timing.USER_SCROLL_GUARD)
-        val strongAdEvidence = forcedByOcr || weakAdConfirmed || scan.adStrongVisible
+        val strongAdEvidence = forcedByOcr || weakAdConfirmed ||
+            scan.adStrongVisible || scan.adViewHit != null
         val canSwipeAd = now >= readyAt && now >= quietUntil
                 && now - lastSwipeAt >= t(Timing.SWIPE_COOLDOWN)
                 && (!userScrollBlocked || strongAdEvidence)
@@ -714,21 +738,33 @@ class AdSkipAccessibilityService : AccessibilityService() {
                     }
                     return
                 }
+                // 广告强信号(OCR 命中/树里强广告词/广告遮罩)优先于误滑锁和回退静默:
+                // 否则会出现"广告还在,但被集数回退锁住十几秒"的情况。
+                val strongAdNow = forcedByOcr || weakAdConfirmed ||
+                    scan.adStrongVisible || scan.adViewHit != null
                 // 回退刚完成时先静默一会儿,避免同一波广告立刻又触发上滑跳集
                 if (now < postCorrectionUntil) {
-                    if (now - lastStuckLogAt >= t(Timing.AD_STUCK_LOG)) {
-                        lastStuckLogAt = now
-                        LogBuf.add("回退后静默中,暂不自动上滑(剩余 ${(postCorrectionUntil - now) / 1000}s)")
+                    if (!strongAdNow) {
+                        if (now - lastStuckLogAt >= t(Timing.AD_STUCK_LOG)) {
+                            lastStuckLogAt = now
+                            LogBuf.add("回退后静默中,暂不自动上滑(剩余 ${(postCorrectionUntil - now) / 1000}s)")
+                        }
+                        return
                     }
-                    return
+                    postCorrectionUntil = 0L
+                    LogBuf.add("广告强信号覆盖回退静默,立即处理广告")
                 }
                 // 上一次自动上滑把集数滑变了:锁定一段时间,绝不再补滑
                 if (now < overshootLockUntil) {
-                    if (now - lastStuckLogAt >= t(Timing.AD_STUCK_LOG)) {
-                        lastStuckLogAt = now
-                        LogBuf.add("误滑换集锁定中,暂停自动上滑(剩余 ${(overshootLockUntil - now) / 1000}s)")
+                    if (!strongAdNow) {
+                        if (now - lastStuckLogAt >= t(Timing.AD_STUCK_LOG)) {
+                            lastStuckLogAt = now
+                            LogBuf.add("误滑换集锁定中,暂停自动上滑(剩余 ${(overshootLockUntil - now) / 1000}s)")
+                        }
+                        return
                     }
-                    return
+                    cancelCorrection("广告强信号覆盖误滑锁定,取消集数回退")
+                    LogBuf.add("广告仍在,忽略误滑锁定并继续上滑")
                 }
                 // OCR 看到「选集」:更像剧集页,这一轮先不乱滑
                 if (now < ocrEpisodeUntil) {
@@ -1233,6 +1269,25 @@ class AdSkipAccessibilityService : AccessibilityService() {
         } else {
             finishCorrection("看不到集数,已回退 $correctionAttempts 次,停止")
         }
+    }
+
+    /**
+     * 广告强信号出现时取消回退:
+     * 不执行后续下滑,不保留 20 秒误滑锁,让广告可以立即上滑。
+     */
+    private fun cancelCorrection(reason: String) {
+        LogBuf.add(reason)
+        correctionTask?.let { handler.removeCallbacks(it) }
+        correctionTask = null
+        correctionTarget = null
+        correctionAttempts = 0
+        correctionRetries = 0
+        overshootLockUntil = 0L
+        postCorrectionUntil = 0L
+        swipeEpisode = null
+        swipeAttempts = 0
+        missSamples = 0
+        prevAdContext = false
     }
 
     private fun finishCorrection(reason: String) {

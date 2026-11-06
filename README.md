@@ -107,9 +107,10 @@
 (例如「上滑继续观看短刷」也能命中「上滑继续观看短剧」);多行文字用无空格方式拼接,
 避免关键词被拆行后匹配不到。
 
-**性能**:剧集页/首页 8 秒一次 OCR,有新窗口事件时 3 秒;
-识别宽度 480/360,截图和缩放放在独立线程。真机实测剧集页 CPU 约 10%(单核),
-每次 OCR 约 0.3–1.1 秒;不需要 OCR 时可在「规则设置」关闭。
+**性能与速度**:剧集页 3 秒一次 OCR(尽量 3 秒内反应),首页 8 秒;
+看到 `ttlive_player_render_view` / `seriestopview` 等广告遮罩 view 时 1 秒内立即触发。
+识别宽度 480/360,截图和缩放放在独立线程。每次 OCR 约 0.3–1.1 秒;
+剧集页 OCR 巡检会增加耗电,不需要 OCR 时可在「规则设置」关闭。
 
 **持久日志**:运行日志同时写入 `filesDir/logs/autoskip.log`,
 超过 2MB 轮转为 `autoskip.log.1`,只保留两份;内存保留 1000 行。
@@ -318,7 +319,7 @@ app/src/main/res/layout/ball_panel_row.xml   面板里的目标应用行(按 KNO
 | Compose BOM | 2024.12.01 |
 | compileSdk / targetSdk | 36(Android 16) |
 | minSdk | 26(Android 8.0) |
-| versionCode / versionName | 160 / 1.6.6 |
+| versionCode / versionName | 161 / 1.6.7 |
 
 > 全屏识字依赖 `com.google.mlkit:text-recognition-chinese:16.0.1`(中文离线模型),
 > APK 体积会比 1.6.2 大约 50MB;只在 Android 11(API 30)及以上启用。
@@ -351,9 +352,9 @@ sdk.dir=C\:\\Android
 
 当前提供两个产物：
 
-- `dist/VideoSwipeTool-1.6.6-release.apk`：正式 keystore 签名，适合对外分发。
+- `dist/VideoSwipeTool-1.6.7-release.apk`：正式 keystore 签名，适合对外分发。
   已安装 debug 签名版的设备必须先卸载才能安装它。
-- `dist/VideoSwipeTool-1.6.6-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
+- `dist/VideoSwipeTool-1.6.7-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
   保留统计和设置；证书显示 `Android Debug`，不适合对外分发。
 
 临时构建 debug 签名版：把 `keystore.properties` 移走后再执行 `assembleRelease` 即可
