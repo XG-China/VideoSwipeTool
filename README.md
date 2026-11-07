@@ -324,10 +324,11 @@ app/src/main/res/layout/ball_panel_row.xml   面板里的目标应用行(按 KNO
 | Compose BOM | 2024.12.01 |
 | compileSdk / targetSdk | 36(Android 16) |
 | minSdk | 26(Android 8.0) |
-| versionCode / versionName | 162 / 1.6.8 |
+| versionCode / versionName | 163 / 1.6.9 |
 
 > 全屏识字依赖 `com.google.mlkit:text-recognition-chinese:16.0.1`(中文离线模型),
-> APK 体积会比 1.6.2 大约 50MB;只在 Android 11(API 30)及以上启用。
+> 1.6.9 起按 CPU 架构拆包:arm64 单包约 14MB,v7a 约 10MB
+> (之前四架构合在一起约 45MB,主要差在 ML Kit 的 OCR 原生库)。
 
 项目自带 Gradle wrapper,无需预装 Gradle:
 
@@ -344,10 +345,11 @@ SDK 路径写进 `local.properties`(该文件不入库):
 sdk.dir=C\:\\Android
 ```
 
-产物:
+产物(按 ABI 拆分):
 
-- debug:`app/build/outputs/apk/debug/app-debug.apk`
-- release:`app/build/outputs/apk/release/app-release.apk`
+- debug:`app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`、`app-armeabi-v7a-debug.apk`
+- release:`app/build/outputs/apk/release/app-arm64-v8a-release.apk`、`app-armeabi-v7a-release.apk`
+- 现在的手机绝大多数用 **arm64-v8a**;只有老 32 位设备才需要 v7a
 
 ### 发布签名
 
@@ -355,12 +357,14 @@ sdk.dir=C\:\\Android
 `keystore.properties` 里记录 `storeFile`、`storePassword`、`keyAlias`、`keyPassword`；
 **务必单独备份这两个文件**，丢失后无法用同一签名更新已安装的正式版。
 
-当前提供两个产物：
+当前提供三个产物：
 
-- `dist/VideoSwipeTool-1.6.8-release.apk`：正式 keystore 签名，适合对外分发。
-  已安装 debug 签名版的设备必须先卸载才能安装它。
-- `dist/VideoSwipeTool-1.6.8-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
+- `dist/VideoSwipeTool-1.6.9-arm64-release.apk`：正式签名，arm64 手机（绝大多数），约 14MB
+- `dist/VideoSwipeTool-1.6.9-v7a-release.apk`：正式签名，老 32 位手机，约 10MB
+- `dist/VideoSwipeTool-1.6.9-arm64-debug-signed.apk`：debug 签名，可直接覆盖升级现有的自用版本，
   保留统计和设置；证书显示 `Android Debug`，不适合对外分发。
+
+正式签名版和 debug 签名版不能互相覆盖；已安装 debug 签名版的设备必须先卸载才能安装正式版。
 
 临时构建 debug 签名版：把 `keystore.properties` 移走后再执行 `assembleRelease` 即可
 （`app/build.gradle.kts` 会回退到 debug 签名）。
@@ -373,7 +377,7 @@ sdk.dir=C\:\\Android
 
 ```powershell
 $adb = "C:\Android\platform-tools\adb.exe"
-& $adb install -r app\build\outputs\apk\release\app-release.apk
+& $adb install -r app\build\outputs\apk\release\app-arm64-v8a-release.apk
 & $adb shell settings put secure enabled_accessibility_services com.autoskip.ad/.AdSkipAccessibilityService
 & $adb shell settings put secure accessibility_enabled 1
 & $adb shell appops set com.autoskip.ad SYSTEM_ALERT_WINDOW allow

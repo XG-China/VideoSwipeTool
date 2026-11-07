@@ -25,8 +25,19 @@ android {
         applicationId = "com.autoskip.ad"
         minSdk = 26
         targetSdk = 36
-        versionCode = 162
-        versionName = "1.6.8"
+        versionCode = 163
+        versionName = "1.6.9"
+    }
+
+    // OCR 引擎(ML Kit)的原生库每个 ABI 约 6–11MB,四个架构打在一起就是 40MB+。
+    // 手机只需要自己架构的那一份,按 ABI 拆包后单包约 11–17MB。
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
+        }
     }
 
     signingConfigs {
