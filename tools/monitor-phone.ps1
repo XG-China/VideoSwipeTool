@@ -63,7 +63,14 @@ $crashProc = Start-Process -FilePath $Adb `
 
 Write-Status "monitor start serial=$Serial duration=${DurationMinutes}min interval=${IntervalSeconds}s"
 Write-Status "serial may drop; script will try adb connect"
-& $Adb -s $Serial logcat -b crash -c 2>$null | Out-Null
+# 没有设备时 adb logcat -c 会一直等设备,导致监控脚本卡死;
+# 只在设备在线时清 crash 缓冲区。
+$startState = (& $Adb -s $Serial get-state 2>$null | Out-String).Trim()
+if ($startState -eq "device") {
+    & $Adb -s $Serial logcat -b crash -c 2>$null | Out-Null
+} else {
+    Write-Status "device=$startState, will retry in loop"
+}
 
 $deadline = (Get-Date).AddMinutes($DurationMinutes)
 $lastShotAt = @{}
