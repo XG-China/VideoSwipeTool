@@ -21,14 +21,16 @@ function Write-Status([string]$msg) {
     Add-Content -Path $statusFile -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $msg)
 }
 $lastAlertAt = @{}
-function Write-Alert([string]$msg, [int]$CooldownSeconds = 90) {
-    # 同一类告警在冷却期内只记一次,避免 OCR/页面反复命中时刷屏
+function Write-Alert([string]$msg, [int]$CooldownSeconds = 90, [string]$Key = "") {
+    # 同一类告警在冷却期内只记一次,避免 OCR/页面反复命中时刷屏。
+    # 动态消息(如 ad page stuck 998s)必须传固定 Key,否则每次秒数不同会绕过冷却。
+    $alertKey = if ($Key) { $Key } else { $msg }
     $nowAlert = Get-Date
-    if ($lastAlertAt.ContainsKey($msg) -and
-        ($nowAlert - $lastAlertAt[$msg]).TotalSeconds -lt $CooldownSeconds) {
+    if ($lastAlertAt.ContainsKey($alertKey) -and
+        ($nowAlert - $lastAlertAt[$alertKey]).TotalSeconds -lt $CooldownSeconds) {
         return
     }
-    $lastAlertAt[$msg] = $nowAlert
+    $lastAlertAt[$alertKey] = $nowAlert
     Add-Content -Path $alertFile -Value ("[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $msg)
     Write-Status "ALERT $msg"
 }
@@ -111,6 +113,14 @@ while ((Get-Date) -lt $deadline) {
     $acc = $cachedAcc
     $appPid = (& $Adb -s $Serial shell "pidof com.autoskip.ad" 2>$null | Out-String).Trim()
 
+    # 切到桌面/微信/其它 App 后,上一条「广告页」日志已经失效,
+    # 不能继续拿它算「卡广告」,否则会报几千秒的假告警。
+    $targetTop = $top -match '(phoenix\.read|aweme|snssdk|kuaishou|com\.ss\.android|qqlive|iqiyi|youku|mgtv|bilibili)'
+    if (-not $targetTop) {
+        $lastPageLine = ""
+        $lastPageAt = [datetime]::MinValue
+    }
+
     $logTail = @()
     if (Test-Path $logFile) { $logTail = Get-Content $logFile -Tail 120 -Encoding UTF8 }
     $logText = ($logTail -join "`n")
@@ -191,11 +201,11 @@ while ((Get-Date) -lt $deadline) {
         Write-Alert "root window null / accessibility abnormal"
     }
 
-    # 2) 广告页停留超过 45 秒且没有上滑记录
-    if ($lastPageLine -match '广告页') {
+    # 2) 广告页停留超过 45 秒且没有上滑记录(只在目标视频 App 前台时判断)
+    if ($targetTop -and $lastPageLine -match '广告页') {
         $stuckSeconds = if ($lastSwipeAt -gt $lastPageAt) { 0 } else { ($now - $lastPageAt).TotalSeconds }
         if ($stuckSeconds -gt 45) {
-            Write-Alert ("ad page stuck {0:N0}s: {1}" -f $stuckSeconds, $pageShort)
+            Write-Alert ("ad page stuck {0:N0}s: {1}" -f $stuckSeconds, $pageShort) 120 "adstuck"
             if (-not $lastShotAt.ContainsKey("adstuck") -or ($now - $lastShotAt["adstuck"]).TotalSeconds -ge 60) {
                 $lastShotAt["adstuck"] = $now
                 Take-Shot "adstuck"
